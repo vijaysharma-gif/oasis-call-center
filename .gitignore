@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Environment variables — never commit
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# Build output
+frontend/dist/
+frontend/.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test coverage
+coverage/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Claude Code local settings
+.claude/
+
+# Misc
+*.vsix
