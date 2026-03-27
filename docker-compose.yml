@@ -9,8 +9,11 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
+      LOG_DIR: /app/logs
     expose:
       - "3001"
+    volumes:
+      - ./logs:/app/logs
     networks:
       - oasis
 

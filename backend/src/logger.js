@@ -3,7 +3,7 @@ require('winston-daily-rotate-file');
 const path = require('path');
 
 const isProd = process.env.NODE_ENV === 'production';
-const LOG_DIR = path.join(__dirname, '../../logs');
+const LOG_DIR = process.env.LOG_DIR || path.join(__dirname, '../../logs');
 
 const { combine, timestamp, errors, json, colorize, printf } = format;
 
