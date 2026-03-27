@@ -3,6 +3,9 @@ node_modules/
 
 # Environment variables — never commit
 .env
+
+# Private keys — never commit
+*.pem
 .env.*
 !.env.example
 
