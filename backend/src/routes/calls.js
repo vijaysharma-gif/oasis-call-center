@@ -382,10 +382,10 @@ router.post('/initiate', async (req, res) => {
     initiated_at: new Date(),
   });
 
-  const params = new URLSearchParams({ auth: process.env.BUZZDIAL_AUTH, cust_no: customer_number, agent_name: 'seqrview' });
+  const params = new URLSearchParams({ auth: process.env.BUZZDIAL_AUTH, cust_no: customer_number, agent_name: process.env.BUZZDIAL_AGENT_NAME || 'seqrview' });
   if (agent_number) params.append('agent_no', agent_number);
 
-  const response = await fetch(`https://buzzdial.io/api/clicktocall.php?${params}`);
+  const response = await fetch(`${process.env.BUZZDIAL_URL || 'https://buzzdial.io/api/clicktocall.php'}?${params}`);
   const result   = await response.json();
   console.log(`[Click2Call] BuzzDial response:`, JSON.stringify(result));
   res.json(result);
