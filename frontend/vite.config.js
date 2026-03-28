@@ -1,18 +1,16 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
-  plugins: [
-    tailwindcss(),
-    react(),
-  ],
+  plugins: [tailwindcss(), react()],
   server: {
     historyApiFallback: true,
+    allowedHosts: true,
   },
   test: {
-    environment: 'jsdom',
+    environment: "jsdom",
     globals: true,
-    setupFiles: ['./src/tests/setup.js'],
+    setupFiles: ["./src/tests/setup.js"],
   },
-})
+});
