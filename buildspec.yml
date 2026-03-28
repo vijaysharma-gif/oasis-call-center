@@ -4,53 +4,36 @@ env:
   variables:
     AWS_DEFAULT_REGION: ap-south-1
     ACCOUNT_ID: 461864990714
-    IMAGE_REPO_NAME: otr-service-dev
-    REPOSITORY_URI: 461864990714.dkr.ecr.ap-south-1.amazonaws.com/otr-service-dev
+    BACKEND_REPO: 461864990714.dkr.ecr.ap-south-1.amazonaws.com/otr-ivr-backend
+    FRONTEND_REPO: 461864990714.dkr.ecr.ap-south-1.amazonaws.com/otr-ivr-frontend
 
 phases:
-  install:
-    commands:
-      - echo "Installing dependencies..."
-      - aws --version
-      - docker --version
-
   pre_build:
     commands:
-      - echo "Logging in to Amazon ECR..."
+      - echo Login to ECR
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
-      - echo "Getting commit ID..."
-      - COMMIT_HASH=$CODEBUILD_RESOLVED_SOURCE_VERSION
-      - IMAGE_TAG=$(echo $COMMIT_HASH | cut -c 1-7)
-
-      - echo "Commit: $COMMIT_HASH"
-      - echo "Image Tag: $IMAGE_TAG"
+      - TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - echo "Tag: $TAG"
 
   build:
     commands:
-      - echo "Build started on `date`"
-      - echo "Building Docker image..."
+      - echo Build Backend
+      - docker build -t backend:$TAG ./backend
+      - docker tag backend:$TAG $BACKEND_REPO:$TAG
+      - docker tag backend:$TAG $BACKEND_REPO:dev1
 
-      - docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
-
-      # Tag for ECR
-      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $REPOSITORY_URI:$IMAGE_TAG
-      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $REPOSITORY_URI:dev1
-      - docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $REPOSITORY_URI:latest
+      - echo Build Frontend
+      - docker build -t frontend:$TAG ./frontend
+      - docker tag frontend:$TAG $FRONTEND_REPO:$TAG
+      - docker tag frontend:$TAG $FRONTEND_REPO:dev1
 
   post_build:
     commands:
-      - echo "Build completed on `date`"
-      - echo "Pushing images to ECR..."
+      - echo Push Backend
+      - docker push $BACKEND_REPO:$TAG
+      - docker push $BACKEND_REPO:dev1
 
-      - docker push $REPOSITORY_URI:$IMAGE_TAG
-      - docker push $REPOSITORY_URI:dev1
-      - docker push $REPOSITORY_URI:latest
-
-      - echo "Writing image definitions file..."
-
-      - printf '[{"name":"app","imageUri":"%s"}]' $REPOSITORY_URI:$IMAGE_TAG > imagedefinitions.json
-
-artifacts:
-  files:
-    - imagedefinitions.json
+      - echo Push Frontend
+      - docker push $FRONTEND_REPO:$TAG
+      - docker push $FRONTEND_REPO:dev1
