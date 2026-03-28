@@ -10,30 +10,30 @@ env:
 phases:
   pre_build:
     commands:
-      - echo Login to ECR
+      - echo "Login to ECR"
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-
-      - TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
-      - echo "Tag: $TAG"
+      - echo "Getting commit tag"
+      - TAG=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c 1-7)
+      - echo "Tag = $TAG"
 
   build:
     commands:
-      - echo Build Backend
+      - echo "Build Backend"
       - docker build -t backend:$TAG ./backend
       - docker tag backend:$TAG $BACKEND_REPO:$TAG
       - docker tag backend:$TAG $BACKEND_REPO:dev1
 
-      - echo Build Frontend
+      - echo "Build Frontend"
       - docker build -t frontend:$TAG ./frontend
       - docker tag frontend:$TAG $FRONTEND_REPO:$TAG
       - docker tag frontend:$TAG $FRONTEND_REPO:dev1
 
   post_build:
     commands:
-      - echo Push Backend
+      - echo "Push Backend"
       - docker push $BACKEND_REPO:$TAG
       - docker push $BACKEND_REPO:dev1
 
-      - echo Push Frontend
+      - echo "Push Frontend"
       - docker push $FRONTEND_REPO:$TAG
       - docker push $FRONTEND_REPO:dev1
