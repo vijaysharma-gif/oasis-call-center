@@ -18,8 +18,8 @@ function getDb() {
           logger.warn('[DB] Connection closed — will reconnect on next request');
           dbPromise = null;
         });
-        const db = client.db('callcenter');
-        logger.info('[DB] Connected', { database: 'callcenter' });
+        const db = client.db();
+        logger.info('[DB] Connected', { database: db.databaseName });
         return Promise.all([
           db.collection('calls').createIndex({ call_id: 1 }, { unique: true }),
           db.collection('call_analysis').createIndex({ call_id: 1 }, { unique: true }),
