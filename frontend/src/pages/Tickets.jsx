@@ -152,7 +152,10 @@ export default function Tickets() {
 
       {/* Table */}
       {loading && tickets.length === 0 ? (
-        <div className="text-center py-16 text-slate-400 dark:text-zinc-500">Loading…</div>
+        <div className="flex flex-col items-center justify-center py-20">
+          <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin mb-3" />
+          <p className="text-sm text-slate-400 dark:text-zinc-500">Loading tickets...</p>
+        </div>
       ) : tickets.length === 0 ? (
         <div className="text-center py-20 text-slate-400 dark:text-zinc-500">
           <svg className="w-10 h-10 mx-auto mb-3 opacity-40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">

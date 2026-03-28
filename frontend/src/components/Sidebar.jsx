@@ -140,16 +140,7 @@ export default function Sidebar({ activePage, onNavigate }) {
           {!collapsed && <span>Sign out</span>}
         </button>
 
-        {/* Collapse toggle */}
-        <button
-          onClick={() => setCollapsed(c => !c)}
-          className="hidden lg:flex w-full items-center justify-center gap-2 px-3 py-2 rounded-lg text-slate-400 dark:text-zinc-500 hover:bg-slate-100 dark:hover:bg-zinc-800 hover:text-slate-600 dark:hover:text-zinc-300 transition-colors text-xs"
-        >
-          <svg className={`w-4 h-4 transition-transform ${collapsed ? 'rotate-180' : ''}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M10 3L5 8l5 5"/>
-          </svg>
-          {!collapsed && <span>Collapse</span>}
-        </button>
+        {!collapsed && <p className="text-center text-[10px] text-slate-300 dark:text-zinc-700 py-1">v2.0.0</p>}
       </div>
     </div>
   );
@@ -188,6 +179,14 @@ export default function Sidebar({ activePage, onNavigate }) {
       {/* ── Desktop sidebar ── */}
       <aside className={`hidden lg:flex flex-col fixed top-0 left-0 h-full bg-white dark:bg-zinc-900 border-r border-slate-200 dark:border-zinc-800 transition-all duration-200 z-20 ${collapsed ? 'w-[60px]' : 'w-56'}`}>
         {sidebarContent}
+        <button
+          onClick={() => setCollapsed(c => !c)}
+          className="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-6 rounded-full bg-white dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 shadow-sm flex items-center justify-center text-slate-400 dark:text-zinc-500 hover:text-slate-600 dark:hover:text-zinc-300 hover:bg-slate-50 dark:hover:bg-zinc-700 transition-colors"
+        >
+          <svg className={`w-3 h-3 transition-transform ${collapsed ? 'rotate-180' : ''}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10 3L5 8l5 5"/>
+          </svg>
+        </button>
       </aside>
 
       {/* Spacer */}

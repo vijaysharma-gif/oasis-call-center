@@ -1,7 +1,8 @@
 const express = require('express');
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../db');
-const { optionalAuth, requireAuth } = require('../middleware/auth');
+const { requireAuth } = require('../middleware/auth');
+const logger = require('../logger');
 
 const router = express.Router();
 
@@ -14,15 +15,19 @@ router.get('/', async (req, res) => {
 
   const conditions = [];
 
-  // Agents see their own calls + all missed calls
+  // Agents see their own calls + missed calls (hide missed calls called back by another agent)
   if (req.user.role === 'agent') {
     conditions.push({
       $or: [
         { agent_number: req.user.agent_number },
         { caller_number: req.user.agent_number },
         { called_number: req.user.agent_number },
-        { agent_answer_time: { $exists: false } },
-        { agent_answer_time: '' },
+        {
+          $and: [
+            { $or: [{ agent_answer_time: { $exists: false } }, { agent_answer_time: '' }] },
+            { $or: [{ called_back_by: { $exists: false } }, { called_back_by: req.user.agent_number }] },
+          ],
+        },
       ],
     });
   }
@@ -85,8 +90,8 @@ router.get('/', async (req, res) => {
       id: _id.toString(),
       ...doc,
       ...(doc.agent_number && agentNameMap[doc.agent_number]
-        ? { agent_name: agentNameMap[doc.agent_number], agent_verified: true }
-        : { agent_verified: false }),
+        ? { agent_name: agentNameMap[doc.agent_number] }
+        : {}),
     };
   });
   res.json({ calls, total });
@@ -213,7 +218,7 @@ router.get('/stats/summary', async (req, res) => {
 
   const andWith = (base, extra) => Object.keys(base).length ? { $and: [base, extra] } : extra;
 
-  const [total, received, missed, recorded, today, [agg], latestDoc, agentBreakdownRaw, agentAvgRaw, categoryRaw, insightsRaw, recentAnalysisRaw] = await Promise.all([
+  const [total, received, missed, recorded, today, [agg], latestDoc, agentBreakdownRaw, agentAvgRaw, categoryRaw, insightsRaw, topBugsRaw] = await Promise.all([
     col.countDocuments(agentFilter),
     col.countDocuments(baseAndFilter(receivedFilter)),
     col.countDocuments(baseAndFilter(missedFilter)),
@@ -246,13 +251,12 @@ router.get('/stats/summary', async (req, res) => {
       { $sort: { count: -1 } },
       { $group: { _id: '$_id.category', insights: { $push: { insight: '$_id.insight', count: '$count' } } } },
     ]).toArray(),
-    db.collection('call_analysis').find(
-      { status: 'completed', $or: [
-        { ai_insight: { $exists: true, $nin: [null, '', '-'] } },
-        { bugs: { $exists: true, $nin: [null, '', '-'] } },
-      ]},
-      { projection: { ai_insight: 1, bugs: 1, category: 1, call_resolved: 1, created_at: 1 } }
-    ).sort({ created_at: -1 }).limit(25).toArray(),
+    db.collection('call_analysis').aggregate([
+      { $match: { status: 'completed', bug_category: { $exists: true, $nin: [null, '', '-', 'Uncategorised'] } } },
+      { $group: { _id: '$bug_category', count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 10 },
+    ]).toArray(),
   ]);
 
   // Enrich agent names from agents collection
@@ -306,9 +310,9 @@ router.get('/stats/summary', async (req, res) => {
     col.find(roleFilter).sort({ created_at: -1 }).limit(1).toArray(),
   ]);
 
-  const recentAnalysis = recentAnalysisRaw.map(({ _id, ...r }) => ({ id: _id.toString(), ...r }));
+  const topBugs = topBugsRaw.map(r => ({ category: r._id, count: r.count }));
 
-  res.json({ total, received, missed, recorded, today, avgDuration: Math.round(agg?.avgDuration || 0), avgAgentDuration: Math.round(agg?.avgAgentDuration || 0), latestMissed, todayByAgent, avgDurationByAgent, categoryBreakdown, categoryInsights, recentAnalysis, minDate: minDateDoc[0]?.created_at ?? null, maxDate: maxDateDoc[0]?.created_at ?? null });
+  res.json({ total, received, missed, recorded, today, avgDuration: Math.round(agg?.avgDuration || 0), avgAgentDuration: Math.round(agg?.avgAgentDuration || 0), latestMissed, todayByAgent, avgDurationByAgent, categoryBreakdown, categoryInsights, topBugs, minDate: minDateDoc[0]?.created_at ?? null, maxDate: maxDateDoc[0]?.created_at ?? null });
 });
 
 // Check if a click2call for a given number was confirmed by webhook within a time window
@@ -362,7 +366,7 @@ router.get('/recordings/check', async (req, res) => {
   const url = call.call_recording;
   try {
     const { status, headers } = await fetch(url, { method: 'HEAD' });
-    console.log(`[Recording Check] call_id=${call.call_id} url=${url} status=${status} size=${headers.get('content-length')} type=${headers.get('content-type')}`);
+    logger.debug('Recording check', { call_id: call.call_id, url, status, size: headers.get('content-length'), type: headers.get('content-type') });
     res.json({ found: true, call_id: call.call_id, url, status, size: headers.get('content-length'), type: headers.get('content-type') });
   } catch (e) {
     res.json({ found: true, call_id: call.call_id, url, error: e.message });
@@ -370,24 +374,26 @@ router.get('/recordings/check', async (req, res) => {
 });
 
 router.post('/initiate', async (req, res) => {
-  const { customer_number, agent_number } = req.body;
+  const { customer_number, agent_number, original_call_id } = req.body;
   if (!customer_number) return res.status(400).json({ error: 'customer_number is required' });
 
-  console.log(`\n[Click2Call] ${new Date().toISOString()}`);
-  console.log(`[Click2Call] customer=${customer_number} agent=${agent_number || 'none'} initiated_by=${req.user?.name || req.user?.role}`);
+  logger.info('Click2Call initiated', { customer: customer_number, agent: agent_number || 'none', initiated_by: req.user?.name || req.user?.role });
 
   const db = await getDb();
   await db.collection('click2call_pending').insertOne({
     customer_number,
+    agent_number: agent_number || '',
+    initiated_by: req.user?.agent_number || req.user?.name || '',
+    original_call_id: original_call_id || '',
     initiated_at: new Date(),
   });
 
-  const params = new URLSearchParams({ auth: process.env.BUZZDIAL_AUTH, cust_no: customer_number, agent_name: process.env.BUZZDIAL_AGENT_NAME || 'seqrview' });
+  const params = new URLSearchParams({ auth: process.env.BUZZDIAL_AUTH, cust_no: customer_number, agent_name: req.user?.name || process.env.BUZZDIAL_AGENT_NAME });
   if (agent_number) params.append('agent_no', agent_number);
 
   const response = await fetch(`${process.env.BUZZDIAL_URL || 'https://buzzdial.io/api/clicktocall.php'}?${params}`);
   const result   = await response.json();
-  console.log(`[Click2Call] BuzzDial response:`, JSON.stringify(result));
+  logger.info('Click2Call BuzzDial response', { result });
   res.json(result);
 });
 

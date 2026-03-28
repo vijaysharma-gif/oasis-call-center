@@ -6,6 +6,8 @@
  *       → generateContent with returned file URI → cleanup.
  */
 
+const logger = require('../logger');
+
 // ─── Categorization schema ────────────────────────────────────────────────────
 
 const CATEGORIZATION_SCHEMA = {
@@ -327,7 +329,7 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
 
 // ─── Core analysis function ───────────────────────────────────────────────────
 
-async function categorizeRecording(audioUrl, maxRetries = 3) {
+async function categorizeRecording(audioUrl, { callCategories = [], bugCategories = [] } = {}, maxRetries = 3) {
   const apiKey = process.env.GEMINI_API_KEY;
   const model  = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
 
@@ -341,17 +343,17 @@ async function categorizeRecording(audioUrl, maxRetries = 3) {
     try {
       if (attempt > 0) {
         const waitMs = Math.min(2 ** attempt, 5) * 1000;
-        console.log(`[Gemini] Retry ${attempt + 1}/${maxRetries}, waiting ${waitMs / 1000}s`);
+        logger.debug('Gemini retry', { attempt: attempt + 1, maxRetries, waitSec: waitMs / 1000 });
         await new Promise(r => setTimeout(r, waitMs));
       }
 
       // ── Upload (stream URL → Gemini, no local download) ──────────────────
-      console.log('[Gemini] Streaming audio to Gemini...');
+      logger.debug('Gemini streaming audio');
       const upStart = Date.now();
 
       const { fileUri, fileName: fn } = await uploadAudioToGemini(audioUrl, apiKey);
       fileName = fn;
-      console.log(`[Gemini] Upload done in ${((Date.now() - upStart) / 1000).toFixed(1)}s`);
+      logger.debug('Gemini upload done', { durationSec: ((Date.now() - upStart) / 1000).toFixed(1) });
 
       // ── Generate analysis ─────────────────────────────────────────────────
       const genStart   = Date.now();
@@ -409,7 +411,8 @@ TASKS:
        "AGENT:" for the support executive
        "SYSTEM:" for any IVR, automated voice, hold music, or pre-recorded messages
    - If parts are unclear, write [inaudible].
-   - Preserve mixed-language speech exactly as spoken (Hindi + English is common).
+   - If the conversation is in Hindi, English, or a mix of both, transcribe in Hinglish (Hindi words written in Roman/Latin script mixed with English). Do NOT use Devanagari script.
+   - Example: "CANDIDATE: Mera registration number nahi mil raha hai, kya aap help kar sakte hain?"
 
 2) Categorization:
    - Determine if the audio is clear enough to identify the candidate's issue.
@@ -457,6 +460,15 @@ TASKS:
 9) Language detection:
    - List all languages spoken (e.g., ["Hindi", "English"]).
 
+10) Call Category:
+   - Based on the ai_insight you generated, assign a call_category from this list: ${JSON.stringify(callCategories)}
+   - If the ai_insight does NOT fit any of the above categories, set call_category to "Uncategorised".
+
+11) Bug Category:
+   - If bugs is not "-" (i.e., a real bug was found), assign a bug_category from this list: ${JSON.stringify(bugCategories)}
+   - If the bug does NOT fit any of the above categories, set bug_category to "Uncategorised".
+   - If bugs is "-", set bug_category to "-".
+
 CATEGORIZATION SCHEMA:
 ${schemaJson}
 
@@ -467,6 +479,8 @@ OUTPUT FORMAT (must match exactly):
   "summary": "",
   "ai_insight": "",
   "bugs": "",
+  "call_category": "",
+  "bug_category": "",
   "agent_score": null,
   "call_resolved": "",
   "audio_quality": { "rating": "", "issues": "" },
@@ -487,7 +501,7 @@ OUTPUT FORMAT (must match exactly):
         generationConfig: { response_mime_type: 'application/json' },
       };
 
-      console.log('[Gemini] Running analysis...');
+      logger.debug('Gemini running analysis');
       const genResp = await fetchWithTimeout(
         generateUrl,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
@@ -527,7 +541,7 @@ OUTPUT FORMAT (must match exactly):
 
       if (analysis.error) return { success: false, error: analysis.error };
 
-      console.log(`[Gemini] Done in ${((Date.now() - startTime) / 1000).toFixed(1)}s total (analysis ${((Date.now() - genStart) / 1000).toFixed(1)}s)`);
+      logger.info('Gemini analysis complete', { totalSec: ((Date.now() - startTime) / 1000).toFixed(1), analysisSec: ((Date.now() - genStart) / 1000).toFixed(1) });
 
       return {
         success:       true,
@@ -536,6 +550,8 @@ OUTPUT FORMAT (must match exactly):
         summary:       analysis.summary       || '',
         ai_insight:    analysis.ai_insight    || '',
         bugs:          analysis.bugs          || '-',
+        call_category: analysis.call_category || 'Uncategorised',
+        bug_category:  analysis.bug_category  || '-',
         agent_score:   typeof analysis.agent_score === 'number' ? analysis.agent_score : null,
         call_resolved: analysis.call_resolved || 'No',
         audio_quality: {
@@ -563,11 +579,11 @@ OUTPUT FORMAT (must match exactly):
         err.message?.toLowerCase().includes('connection');
 
       if (isRetryable && attempt < maxRetries - 1) {
-        console.warn(`[Gemini] Retryable error (attempt ${attempt + 1}): ${err.message}`);
+        logger.warn('Gemini retryable error', { attempt: attempt + 1, error: err.message });
         continue;
       }
 
-      console.error(`[Gemini] Fatal error: ${err.message}`);
+      logger.error('Gemini fatal error', { error: err.message });
       return { success: false, error: err.message, permanent: !!err.permanent };
     }
   }

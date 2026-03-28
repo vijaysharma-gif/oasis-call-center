@@ -93,7 +93,9 @@ export function useCalls({ search, status, page = 1, pageSize = 25, token, dateF
 
   useEffect(() => {
     fetchCalls();
-    const interval = setInterval(fetchCalls, 5000);
+    const interval = setInterval(() => {
+      if (!document.hidden) fetchCalls();
+    }, 5000);
     return () => clearInterval(interval);
   }, [fetchCalls]);
 
@@ -123,30 +125,32 @@ export function useStats(token, { dateFrom, dateTo } = {}) {
 
   useEffect(() => {
     fetchStats();
-    const interval = setInterval(fetchStats, 5000);
+    const interval = setInterval(() => {
+      if (!document.hidden) fetchStats();
+    }, 5000);
     return () => clearInterval(interval);
   }, [fetchStats]);
 
   return { stats, loading, refetch: fetchStats };
 }
 
-export async function initiateCall(customer_number, agent_number, token) {
+export async function initiateCall(customer_number, agent_number, token, original_call_id) {
   const res = await fetch(`${API}/api/calls/initiate`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ customer_number, agent_number }),
+    body: JSON.stringify({ customer_number, agent_number, original_call_id }),
   });
   return res.json();
 }
 
-// Polls for 20 seconds (every 3s) to see if a click2call webhook landed for the number.
+// Polls for 5 minutes (every 5s) to see if a click2call webhook landed for the number.
 // Calls onConfirmed() if found, onTimeout() if not found within the window.
 export function pollClick2Call(customerNumber, since, token, { onConfirmed, onTimeout }) {
-  const INTERVAL = 3000;
-  const TIMEOUT  = 20000;
+  const INTERVAL = 5000;
+  const TIMEOUT  = 5 * 60 * 1000;
   const headers  = token ? { Authorization: `Bearer ${token}` } : {};
   let elapsed    = 0;
 

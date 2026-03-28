@@ -232,7 +232,10 @@ export default function CallReport() {
           <p className="text-sm mt-1 text-slate-500 dark:text-zinc-500">{error}</p>
         </div>
       ) : loading && calls.length === 0 ? (
-        <div className="text-center py-16 text-slate-400 dark:text-zinc-500">Loading…</div>
+        <div className="flex flex-col items-center justify-center py-20">
+          <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin mb-3" />
+          <p className="text-sm text-slate-400 dark:text-zinc-500">Loading calls...</p>
+        </div>
       ) : (
         <CallsTable
           key={`${search}|${status}|${page}|${dateFrom}|${dateTo}|${agentNumber}`}

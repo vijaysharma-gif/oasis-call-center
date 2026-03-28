@@ -1,6 +1,7 @@
 const express = require('express');
 const { getDb } = require('../db');
 const { enqueueRecording } = require('../workers/analysisWorker');
+const logger = require('../logger');
 
 // Normalize to last 10 digits for comparison (handles +91, 91, 0 prefixes)
 function normalizeNumber(num) {
@@ -25,7 +26,6 @@ function extractCall(payload) {
     duration:          parseInt(p.duration || p.call_duration || 0) || 0,
     call_recording:    p.call_recording || p.callrecording || p.recording_url || p.recording || p.recurl || p.file_url || p.audio_url || '',
     agent_duration:    (() => { const v = parseInt(p.agent_duration || p.agentduration || 0) || 0; return v > 86400 ? 0 : v; })(),
-    raw_payload:       JSON.stringify(payload),
   };
 }
 
@@ -34,7 +34,7 @@ async function upsertCall(db, call) {
     await db.collection('calls').insertOne({ ...call, created_at: new Date() });
   } catch (err) {
     if (err.code === 11000) {
-      const updates = { raw_payload: call.raw_payload };
+      const updates = {};
       for (const [key, val] of Object.entries(call)) {
         if (key === 'call_id') continue;
         if (key === 'call_recording' && val !== '') { updates[key] = val; continue; }
@@ -50,8 +50,7 @@ async function upsertCall(db, call) {
 
 router.all('/', async (req, res) => {
   const payload = Object.keys(req.body || {}).length > 0 ? req.body : req.query;
-  console.log(`\n[Webhook] ${req.method} ${new Date().toISOString()}`);
-  console.log('[Webhook] Raw payload:', JSON.stringify(payload, null, 2));
+  logger.debug('Webhook received', { method: req.method, payload });
 
   try {
     const db = await getDb();
@@ -70,33 +69,40 @@ router.all('/', async (req, res) => {
     });
     if (pending) {
       call.source = 'click2call';
+      // Mark the original missed call as called back by this agent
+      const pendingNorm = normalizeNumber(pending.customer_number);
+      if (pending.initiated_by && pending.original_call_id) {
+        await db.collection('calls').updateOne(
+          { call_id: pending.original_call_id },
+          { $set: { called_back_by: pending.initiated_by, called_back_at: new Date() } }
+        );
+      }
       await db.collection('click2call_pending').deleteOne({ _id: pending._id });
-      console.log(`[Webhook] Tagged as click2call (matched customer ${pending.customer_number})`);
+      logger.info('Webhook tagged as click2call', { customer: pending.customer_number, called_back_by: pending.initiated_by });
     }
 
     // Reject pings / empty payloads — must have at least a real call_id or a phone number
     const hasRealCallId = call.call_id && !call.call_id.startsWith('wb_');
     const hasNumber     = call.caller_number || call.called_number;
     if (!hasRealCallId && !hasNumber) {
-      console.log('[Webhook] Empty/ping payload — ignored');
+      logger.debug('Webhook empty/ping payload — ignored');
       return res.json({ status: 'ok' });
     }
 
-    console.log('[Webhook] Extracted:', JSON.stringify(call, null, 2));
-    console.log(`[Webhook] caller_norm=${callerNorm} called_norm=${calledNorm}`);
+    logger.debug('Webhook extracted call', { call_id: call.call_id, callerNorm, calledNorm });
     await upsertCall(db, call);
-    console.log(`[Webhook] Saved call_id: ${call.call_id}`);
+    logger.info('Webhook saved call', { call_id: call.call_id });
 
     // Auto-enqueue for AI analysis if a recording URL is present
     if (call.call_recording) {
       enqueueRecording(call.call_id, call.call_recording).catch(err =>
-        console.error('[Webhook] Enqueue error:', err.message)
+        logger.error('Webhook enqueue error', { error: err.message })
       );
     }
 
     res.json({ status: 'ok', call_id: call.call_id });
   } catch (err) {
-    console.error('[Webhook] Error:', err.message, err.stack);
+    logger.error('Webhook error', { error: err.message, stack: err.stack });
     res.status(500).json({ status: 'error', message: err.message });
   }
 });

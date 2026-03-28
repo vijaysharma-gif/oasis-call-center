@@ -14,6 +14,7 @@ const authRouter     = require('./routes/auth');
 const ticketsRouter  = require('./routes/tickets');
 const { requireAuth } = require('./middleware/auth');
 const { startWorker } = require('./workers/analysisWorker');
+const { startBugCategoryWorker } = require('./workers/bugCategoryWorker');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -23,10 +24,15 @@ const isProd = process.env.NODE_ENV === 'production';
 app.use(helmet());
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(',');
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(',').map(o => o.trim());
+const wildcardPatterns = allowedOrigins
+  .filter(o => o.includes('*'))
+  .map(o => new RegExp('^' + o.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^.]+') + '$'));
+const exactOrigins = new Set(allowedOrigins.filter(o => !o.includes('*')));
+
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    if (!origin || exactOrigins.has(origin) || wildcardPatterns.some(re => re.test(origin))) return cb(null, true);
     cb(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
@@ -107,6 +113,7 @@ if (require.main === module) {
   const server = app.listen(PORT, '0.0.0.0', () => {
     logger.info(`Server started`, { port: PORT, env: process.env.NODE_ENV || 'development' });
     startWorker();
+    startBugCategoryWorker();
   });
 
   // Graceful shutdown

@@ -262,8 +262,9 @@ export default function Agents() {
       {error ? (
         <p className="text-red-500 dark:text-red-400 text-sm">{error}</p>
       ) : loading ? (
-        <div className="text-center py-16 text-slate-400 dark:text-zinc-500">
-          Loading…
+        <div className="flex flex-col items-center justify-center py-20">
+          <div className="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin mb-3" />
+          <p className="text-sm text-slate-400 dark:text-zinc-500">Loading agents...</p>
         </div>
       ) : agents.length === 0 ? (
         <div className="text-center py-20 text-slate-400 dark:text-zinc-500">
@@ -318,6 +319,7 @@ export default function Agents() {
                     Resolved % <SortIcon col="resolvedPct" />
                   </span>
                 </th>
+                <th className="px-4 py-3 font-semibold">Tickets</th>
                 <th className="px-4 py-3 font-semibold">Created</th>
                 <th className="px-4 py-3 font-semibold">Password</th>
                 <th className="px-4 py-3 font-semibold w-28">Actions</th>
@@ -412,6 +414,20 @@ export default function Agents() {
                             %
                           </span>
                         </span>
+                      );
+                    })()}
+                  </td>
+                  <td className="px-4 py-3">
+                    {(() => {
+                      const t = metrics[agent.agent_number]?.tickets;
+                      if (!t || t.total === 0) return <span className="text-slate-400 dark:text-zinc-500">—</span>;
+                      return (
+                        <div className="flex items-center gap-1.5 text-xs">
+                          {t.open > 0 && <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 font-medium">{t.open} Open</span>}
+                          {t.inProg > 0 && <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400 font-medium">{t.inProg} In Prog</span>}
+                          {t.resolved > 0 && <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 font-medium">{t.resolved} Done</span>}
+                          {t.closed > 0 && <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 dark:bg-zinc-800 dark:text-zinc-400 font-medium">{t.closed} Closed</span>}
+                        </div>
                       );
                     })()}
                   </td>

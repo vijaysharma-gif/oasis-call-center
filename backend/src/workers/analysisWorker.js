@@ -9,6 +9,7 @@ const { getDb }               = require('../db');
 const { categorizeRecording } = require('../services/geminiService');
 const logger                  = require('../logger');
 
+
 const POLL_INTERVAL_MS = 10_000;  // check every 10 seconds
 const STALE_LOCK_MIN   = 15;      // re-queue if stuck in "processing" > 15 min
 
@@ -55,7 +56,7 @@ async function processTick() {
     if (callDoc && callDoc.duration > 0 && callDoc.duration < 10) {
       await analysisCol.updateOne(
         { call_id },
-        { $set: { status: 'completed', category: 'Call too Short', sub_category: '', summary: '', transcription: '', language: '', error: null, processed_at: new Date(), updated_at: new Date() } }
+        { $set: { status: 'completed', category: 'Call too Short', sub_category: '', call_category: 'Call too Short', summary: '', transcription: '', language: '', error: null, processed_at: new Date(), updated_at: new Date() } }
       );
       await callsCol.updateOne({ call_id }, { $set: { category: 'Call too Short', sub_category: '' } });
       logger.info('[Worker] Skipped (too short)', { call_id, duration: callDoc.duration });
@@ -63,12 +64,20 @@ async function processTick() {
       return;
     }
 
-    const result = await categorizeRecording(recording_url);
+    // Fetch existing categories to pass to Gemini in a single call
+    const [callCatDocs, bugCatDocs] = await Promise.all([
+      db.collection('call_categories').find({}).toArray(),
+      db.collection('bug_categories').find({}).toArray(),
+    ]);
+    const callCategories = callCatDocs.map(c => c.name);
+    const bugCategories = bugCatDocs.map(c => c.name);
+
+    const result = await categorizeRecording(recording_url, { callCategories, bugCategories });
 
     if (result.success && result.category === 'Audio Unclear') {
       await analysisCol.updateOne(
         { call_id },
-        { $set: { status: 'completed', category: 'Audio Unclear', sub_category: '', summary: result.summary || '', ai_insight: '-', bugs: '-', agent_score: null, call_resolved: 'No', audio_quality: result.audio_quality, transcription: result.transcription || '', language: result.language || [], error: null, processed_at: new Date(), updated_at: new Date() } }
+        { $set: { status: 'completed', category: 'Audio Unclear', sub_category: '', call_category: 'Audio Unclear', summary: result.summary || '', ai_insight: '-', bugs: '-', agent_score: null, call_resolved: 'No', audio_quality: result.audio_quality, transcription: result.transcription || '', language: result.language || [], error: null, processed_at: new Date(), updated_at: new Date() } }
       );
       await callsCol.updateOne({ call_id }, { $set: { category: 'Audio Unclear', sub_category: '' } });
       logger.info('[Worker] Audio Unclear', { call_id });
@@ -90,6 +99,8 @@ async function processTick() {
             summary:       result.summary,
             ai_insight:    result.ai_insight,
             bugs:          result.bugs,
+            call_category: result.call_category,
+            bug_category:  result.bug_category,
             agent_score:   result.agent_score,
             call_resolved: result.call_resolved,
             audio_quality: result.audio_quality,
@@ -105,7 +116,7 @@ async function processTick() {
         { call_id },
         { $set: { category: result.category, sub_category: result.sub_category } }
       );
-      logger.info('[Worker] Done', { call_id, category: result.category, sub_category: result.sub_category });
+      logger.info('[Worker] Done', { call_id });
     } else {
       await analysisCol.updateOne(
         { call_id },

@@ -73,6 +73,19 @@ router.get('/metrics', async (req, res) => {
     }},
   ]).toArray();
 
+  // Ticket counts per agent
+  const ticketRows = await db.collection('tickets').aggregate([
+    { $match: { agent_number: { $exists: true, $ne: null } } },
+    { $group: {
+      _id:    '$agent_number',
+      open:   { $sum: { $cond: [{ $eq: ['$status', 'Open'] }, 1, 0] } },
+      inProg: { $sum: { $cond: [{ $eq: ['$status', 'In Progress'] }, 1, 0] } },
+      resolved: { $sum: { $cond: [{ $eq: ['$status', 'Resolved'] }, 1, 0] } },
+      closed: { $sum: { $cond: [{ $eq: ['$status', 'Closed'] }, 1, 0] } },
+      total:  { $sum: 1 },
+    }},
+  ]).toArray();
+
   const metrics = {};
   for (const r of callRows) {
     metrics[r._id] = { received: r.received, avgDuration: Math.round(r.avgDuration) };
@@ -81,6 +94,10 @@ router.get('/metrics', async (req, res) => {
     if (!metrics[r._id]) metrics[r._id] = {};
     metrics[r._id].avgScore     = r.scoredCalls > 0 ? Math.round((r.scoreSum / r.scoredCalls) * 10) / 10 : null;
     metrics[r._id].resolvedPct  = r.totalAnalyzed > 0 ? Math.round((r.resolved / r.totalAnalyzed) * 100) : null;
+  }
+  for (const r of ticketRows) {
+    if (!metrics[r._id]) metrics[r._id] = {};
+    metrics[r._id].tickets = { open: r.open, inProg: r.inProg, resolved: r.resolved, closed: r.closed, total: r.total };
   }
 
   res.json({ metrics });

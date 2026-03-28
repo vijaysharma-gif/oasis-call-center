@@ -25,6 +25,7 @@ function getDb() {
           db.collection('call_analysis').createIndex({ call_id: 1 }, { unique: true }),
           db.collection('call_analysis').createIndex({ status: 1, created_at: 1 }),
           db.collection('agents').createIndex({ agent_number: 1 }, { unique: true }),
+          db.collection('click2call_pending').createIndex({ initiated_at: 1 }, { expireAfterSeconds: 1800 }),
         ]).then(() => db);
       })
       .catch(err => {

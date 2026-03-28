@@ -18,9 +18,12 @@ router.get('/:call_id', async (req, res) => {
 // GET /api/analysis — paginated list with search/filter + joined call data
 router.get('/', async (req, res) => {
   const db = await getDb();
-  const { status, category, search, limit = '25', offset = '0', dateFrom, dateTo, sortBy, sortDir } = req.query;
+  const { status, category, search, limit = '25', offset = '0', dateFrom, dateTo, sortBy, sortDir, bugsOnly, bugCategory, callCategory } = req.query;
 
   const conditions = [{ status: 'completed' }];
+  if (bugsOnly) conditions.push({ bugs: { $exists: true, $nin: ['', '-'] } });
+  if (bugCategory) conditions.push({ bug_category: bugCategory });
+  if (callCategory) conditions.push({ call_category: callCategory });
   if (category) conditions.push({ category });
   if (search)   conditions.push({ $or: [
     { call_id:     { $regex: search, $options: 'i' } },
@@ -37,7 +40,7 @@ router.get('/', async (req, res) => {
 
   const filter = { $and: conditions };
 
-  const SORT_FIELDS = { bugs: 'bugs', call_resolved: 'call_resolved', agent_score: 'agent_score', audio_quality: 'audio_quality.rating', created_at: 'created_at' };
+  const SORT_FIELDS = { bugs: 'bugs', bug_category: 'bug_category', call_category: 'call_category', call_resolved: 'call_resolved', agent_score: 'agent_score', audio_quality: 'audio_quality.rating', created_at: 'created_at' };
   const sortField = SORT_FIELDS[sortBy] ?? 'created_at';
   const sortOrder = sortDir === 'asc' ? 1 : -1;
 
@@ -51,7 +54,7 @@ router.get('/', async (req, res) => {
   const callIds  = docs.map(d => d.call_id);
   const callDocs = callIds.length
     ? await db.collection('calls').find({ call_id: { $in: callIds } },
-        { projection: { call_id:1, caller_number:1, called_number:1, agent_name:1, agent_number:1, call_start_time:1, duration:1 } }
+        { projection: { call_id:1, caller_number:1, called_number:1, agent_name:1, agent_number:1, call_start_time:1, duration:1, call_recording:1 } }
       ).toArray()
     : [];
   const callMap = Object.fromEntries(callDocs.map(c => [c.call_id, c]));
@@ -59,10 +62,14 @@ router.get('/', async (req, res) => {
   const analyses = docs.map(d => ({ ...d, call: callMap[d.call_id] || null }));
 
   // Distinct categories for filter dropdown
-  const categories = await db.collection('call_analysis')
-    .distinct('category', { status: 'completed', category: { $exists: true, $ne: '' } });
+  const [categories, bugCategories, callCategories] = await Promise.all([
+    db.collection('call_analysis')
+      .distinct('category', { status: 'completed', category: { $exists: true, $ne: '' } }),
+    db.collection('bug_categories').find({}).sort({ name: 1 }).toArray(),
+    db.collection('call_categories').find({}).sort({ name: 1 }).toArray(),
+  ]);
 
-  res.json({ analyses, total, categories: categories.sort() });
+  res.json({ analyses, total, categories: categories.sort(), bugCategories: bugCategories.map(c => c.name), callCategories: callCategories.map(c => c.name) });
 });
 
 module.exports = router;

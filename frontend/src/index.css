@@ -40,3 +40,14 @@ body {
 .dark ::-webkit-scrollbar-thumb:hover {
   background: #52525b;
 }
+
+/* Highlight animation for AI Analysis row */
+@keyframes highlight-pulse {
+  0%   { background-color: rgb(99 102 241 / 0.25); }
+  50%  { background-color: rgb(99 102 241 / 0.1); }
+  100% { background-color: rgb(99 102 241 / 0.25); }
+}
+
+.animate-highlight {
+  animation: highlight-pulse 0.8s ease-in-out 3;
+}

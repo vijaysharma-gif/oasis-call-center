@@ -76,7 +76,7 @@ function TicketBtn({ onClick }) {
     <button
       onClick={onClick}
       title="Create Ticket"
-      className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-slate-400 dark:text-zinc-500 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition-colors"
+      className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-red-400 dark:text-red-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
     >
       <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
         <path d="M2 4.5A1.5 1.5 0 013.5 3h9A1.5 1.5 0 0114 4.5v2a1.5 1.5 0 010 3v2A1.5 1.5 0 0112.5 13h-9A1.5 1.5 0 012 11.5v-2a1.5 1.5 0 010-3v-2z"/>
@@ -94,7 +94,7 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
     setDialState(s => ({ ...s, [call.id]: 'loading' }));
     try {
       const since = Date.now();
-      const res   = await initiateCall(call.caller_number, agentNumber, token);
+      const res   = await initiateCall(call.caller_number, agentNumber, token, call.call_id);
       const ok    = res.status === 'Success' || res.status === 'success';
       if (!ok) {
         setDialState(s => ({ ...s, [call.id]: 'error' }));
@@ -106,12 +106,10 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
       pollClick2Call(call.caller_number, since, token, {
         onConfirmed: () => {
           setDialState(s => ({ ...s, [call.id]: 'connected' }));
-          setTimeout(() => setDialState(s => { const n = { ...s }; delete n[call.id]; return n; }), 4000);
         },
         onTimeout: () => {
-          // BuzzDial said success but webhook didn't arrive — show initiated state
-          setDialState(s => ({ ...s, [call.id]: 'initiated' }));
-          setTimeout(() => setDialState(s => { const n = { ...s }; delete n[call.id]; return n; }), 4000);
+          // BuzzDial said success but webhook didn't arrive — reset to allow retry
+          setDialState(s => { const n = { ...s }; delete n[call.id]; return n; });
         },
       });
     } catch {
@@ -123,14 +121,27 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
   function DialBtn({ call }) {
     const isMissed = !call.agent_answer_time;
     if (!isMissed || call.caller_number === SYSTEM_NUMBER) return null;
-    const state = dialState[call.id];
+    const calledBack = !!call.called_back_by;
+    const state = calledBack ? 'connected' : dialState[call.id];
+    if (calledBack) {
+      return (
+        <span
+          title="Call Resolved"
+          className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 8l3.5 3.5L13 4"/>
+          </svg>
+        </span>
+      );
+    }
     return (
       <button
         onClick={e => { e.stopPropagation(); handleDial(call); }}
         disabled={state === 'loading'}
         title={
           state === 'polling'   ? 'Waiting for confirmation…' :
-          state === 'connected' ? 'Call connected!' :
+          state === 'connected' ? 'Call Resolved' :
           state === 'initiated' ? 'Call initiated (no webhook yet)' :
           `Call back ${call.caller_number}`
         }
@@ -153,10 +164,6 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
         ) : state === 'connected' ? (
           <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M3 8l3.5 3.5L13 4"/>
-          </svg>
-        ) : state === 'initiated' ? (
-          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="8" cy="8" r="6"/><path d="M8 5v3M8 11h.01"/>
           </svg>
         ) : state === 'error' ? (
           <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
