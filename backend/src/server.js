@@ -33,7 +33,8 @@ const exactOrigins = new Set(allowedOrigins.filter(o => !o.includes('*')));
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || exactOrigins.has(origin) || wildcardPatterns.some(re => re.test(origin))) return cb(null, true);
-    cb(new Error(`CORS: origin ${origin} not allowed`));
+    logger.warn('CORS blocked', { origin });
+    cb(null, false);
   },
   credentials: true,
 }));
