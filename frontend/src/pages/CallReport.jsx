@@ -86,6 +86,8 @@ export default function CallReport() {
       const data = await res.json();
 
       const ws = XLSX.utils.json_to_sheet(data.rows);
+      const headers = Object.keys(data.rows[0] || {});
+      ws['!cols'] = headers.map(h => ({ wch: ['Summary', 'Bug Description', 'Transcription'].includes(h) ? 60 : (['Call ID', 'Recording URL'].includes(h) ? 30 : 18) }));
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Call Report');
 
