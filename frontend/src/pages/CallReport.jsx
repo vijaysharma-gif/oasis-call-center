@@ -4,7 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import CallsTable from '../components/CallsTable';
 import CallTicketModal from '../components/CallTicketModal';
 import InitiateCallModal from '../components/InitiateCallModal';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import Pagination from '../components/Pagination';
 
 const API = import.meta.env.VITE_API_URL ?? '';
@@ -85,14 +85,39 @@ export default function CallReport() {
       const res  = await fetch(`${API}/api/calls/export?${params}`, { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
 
-      const ws = XLSX.utils.json_to_sheet(data.rows);
-      const headers = Object.keys(data.rows[0] || {});
-      ws['!cols'] = headers.map(h => ({ wch: ['Summary', 'Bug Description', 'Transcription'].includes(h) ? 60 : (['Call ID', 'Recording URL'].includes(h) ? 30 : 18) }));
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Call Report');
+      const wrapCols = new Set(['Summary', 'Bug Description', 'Transcription']);
+      const wideCols = new Set(['Call ID', 'Recording URL']);
+      const cols = Object.keys(data.rows[0] || {});
 
-      const fileName = `call-report-${effectiveFrom || 'all'}-to-${effectiveTo || 'all'}.xlsx`;
-      XLSX.writeFile(wb, fileName);
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Call Report');
+      ws.columns = cols.map(h => ({
+        header: h, key: h,
+        width: wrapCols.has(h) ? 60 : wideCols.has(h) ? 30 : 18,
+      }));
+      ws.getRow(1).font = { bold: true };
+
+      for (const row of data.rows) {
+        ws.addRow(row);
+      }
+
+      ws.eachRow((row, rowNum) => {
+        if (rowNum === 1) return;
+        row.eachCell((cell, colNum) => {
+          if (wrapCols.has(cols[colNum - 1])) {
+            cell.alignment = { wrapText: true, vertical: 'top' };
+          }
+        });
+      });
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `call-report-${effectiveFrom || 'all'}-to-${effectiveTo || 'all'}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
     } catch (e) {
       alert(`Export failed: ${e.message}`);
     } finally {
