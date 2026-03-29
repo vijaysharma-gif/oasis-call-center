@@ -152,25 +152,43 @@ router.get('/export', async (req, res) => {
     : [];
   const agentNameMap = Object.fromEntries(agentDocs.map(a => [a.agent_number, a.name]));
 
+  // Join analysis data
+  const callIds = docs.map(d => d.call_id).filter(Boolean);
+  const analysisDocs = callIds.length
+    ? await db.collection('call_analysis').find({ call_id: { $in: callIds }, status: 'completed' }).toArray()
+    : [];
+  const analysisMap = Object.fromEntries(analysisDocs.map(a => [a.call_id, a]));
+
   const fmt = v => v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '';
 
-  const rows = docs.map(doc => ({
-    'Call ID':          doc.call_id || '',
-    'Caller Number':    doc.caller_number || '',
-    'Called Number':    doc.called_number || '',
-    'Agent Name':       agentNameMap[doc.agent_number] || doc.agent_name || '',
-    'Agent Number':     doc.agent_number || '',
-    'Status':           doc.agent_answer_time ? 'Received' : 'Missed',
-    'Call Start Time':  fmt(doc.call_start_time),
-    'Answer Time':      fmt(doc.agent_answer_time),
-    'Call End Time':    fmt(doc.call_end_time),
-    'Duration (s)':     doc.duration || 0,
-    'Agent Duration (s)': (doc.agent_answer_time && doc.call_end_time) ? Math.max(0, Math.floor((new Date(doc.call_end_time) - new Date(doc.agent_answer_time)) / 1000)) : 0,
-    'Category':         doc.category || '',
-    'Sub-Category':     doc.sub_category || '',
-    'Recording URL':    doc.call_recording || '',
-    'Created At':       fmt(doc.created_at),
-  }));
+  const rows = docs.map(doc => {
+    const a = analysisMap[doc.call_id] || {};
+    return {
+      'Call ID':          doc.call_id || '',
+      'Caller Number':    doc.caller_number || '',
+      'Called Number':    doc.called_number || '',
+      'Agent Name':       agentNameMap[doc.agent_number] || doc.agent_name || '',
+      'Agent Number':     doc.agent_number || '',
+      'Status':           doc.agent_answer_time ? 'Received' : 'Missed',
+      'Call Start Time':  fmt(doc.call_start_time),
+      'Answer Time':      fmt(doc.agent_answer_time),
+      'Call End Time':    fmt(doc.call_end_time),
+      'Duration (s)':     doc.duration || 0,
+      'Agent Duration (s)': doc.agent_duration || 0,
+      'Call Category':    a.call_category || '',
+      'Sub-Category':     a.ai_insight || '',
+      'Summary':          (a.summary || '').replace(/\n/g, '\r\n'),
+      'Bug Category':     a.bug_category || '',
+      'Bug Description':  a.bugs || '',
+      'Call Resolved':    a.call_resolved || '',
+      'Agent Score':      a.agent_score ?? '',
+      'Audio Rating':     a.audio_quality?.rating || '',
+      'Language':         Array.isArray(a.language) ? a.language.join(', ') : (a.language || ''),
+      'Recording URL':    doc.call_recording || '',
+      'Transcription':    (a.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim(),
+      'Created At':       fmt(doc.created_at),
+    };
+  });
 
   res.json({ rows });
 });

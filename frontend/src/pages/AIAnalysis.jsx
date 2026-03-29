@@ -165,24 +165,30 @@ export default function AIAnalysis() {
       const res  = await fetch(`${API}/api/analysis?${params}`, { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       const rows = (data.analyses ?? []).map(a => ({
-        'Call ID':       a.call_id,
-        'Category':      a.category || '',
-        'Sub-Category':  a.sub_category || '',
-        'AI Insight':    a.ai_insight || '',
-        'Summary':       a.summary || '',
-        'Call Resolved': a.call_resolved || '',
-        'Agent Score':   a.agent_score ?? '',
-        'Audio Rating':  a.audio_quality?.rating || '',
-        'Audio Issues':  a.audio_quality?.issues || '',
-        'Bug':           a.bugs || '',
-        'Language':      Array.isArray(a.language) ? a.language.join(', ') : (a.language || ''),
-        'Caller':        a.call?.caller_number || '',
-        'Agent Number':  a.call?.agent_number || '',
-        'Duration (s)':  a.call?.duration ?? '',
-        'Date':          a.call?.created_at ? new Date(a.call.created_at).toLocaleString('en-IN') : '',
+        'Call ID':         a.call_id,
+        'Call Category':   a.call_category || '',
+        'Sub-Category':    a.ai_insight || '',
+        'Gemini Category': a.category || '',
+        'Gemini Sub-Cat':  a.sub_category || '',
+        'Summary':         (a.summary || '').replace(/\n/g, '\r\n'),
+        'Bug Category':    a.bug_category || '',
+        'Bug Description': a.bugs || '',
+        'Call Resolved':   a.call_resolved || '',
+        'Agent Score':     a.agent_score ?? '',
+        'Audio Rating':    a.audio_quality?.rating || '',
+        'Audio Issues':    a.audio_quality?.issues || '',
+        'Language':        Array.isArray(a.language) ? a.language.join(', ') : (a.language || ''),
+        'Caller':          a.call?.caller_number || '',
+        'Agent Number':    a.call?.agent_number || '',
+        'Duration (s)':    a.call?.duration ?? '',
+        'Recording':       a.call?.call_recording || '',
+        'Date':            a.call?.created_at ? new Date(a.call.created_at).toLocaleString('en-IN') : '',
+        'Transcription':   (a.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim(),
       }));
 
       const ws  = XLSX.utils.json_to_sheet(rows);
+      const headers = Object.keys(rows[0] || {});
+      ws['!cols'] = headers.map(h => ({ wch: ['Summary', 'Bug Description', 'Transcription'].includes(h) ? 60 : (['Call ID', 'Recording'].includes(h) ? 30 : 18) }));
       const wb  = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'AI Analysis');
       XLSX.writeFile(wb, `ai_analysis_${new Date().toISOString().slice(0,10)}.xlsx`);
