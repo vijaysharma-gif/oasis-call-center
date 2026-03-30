@@ -56,6 +56,16 @@ function fmt(sec) {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+function fmtTotal(sec) {
+  if (!sec) return "—";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 const PAGE_SIZES = [10, 25, 50, 100];
 
 export default function Agents() {
@@ -377,7 +387,7 @@ export default function Agents() {
                     {fmt(metrics[agent.agent_number]?.avgDuration)}
                   </td>
                   <td className="px-4 py-3 text-slate-600 dark:text-zinc-300 tabular-nums">
-                    {fmt(metrics[agent.agent_number]?.totalDuration)}
+                    {fmtTotal(metrics[agent.agent_number]?.totalDuration)}
                   </td>
                   <td className="px-4 py-3 tabular-nums">
                     {(() => {
