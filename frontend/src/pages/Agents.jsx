@@ -69,7 +69,7 @@ export default function Agents() {
   const [resetTarget, setResetTarget] = useState(null);
   const [showBulk, setShowBulk] = useState(false);
   const [search, setSearch] = useState("");
-  const [sortKey, setSortKey] = useState(null); // 'received' | 'avgDuration' | 'avgScore' | 'resolvedPct'
+  const [sortKey, setSortKey] = useState(null); // 'received' | 'totalDuration' | 'avgDuration' | 'avgScore' | 'resolvedPct'
   const [sortDir, setSortDir] = useState("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
@@ -83,6 +83,7 @@ export default function Agents() {
           "Agent Name": a.name,
           "Agent Number": a.agent_number,
           "Calls Received": m.received ?? "",
+          "Total Duration (s)": m.totalDuration ?? "",
           "Avg Duration (s)": m.avgDuration ?? "",
           "Avg Score": m.avgScore ?? "",
           "Resolved %": m.resolvedPct != null ? `${m.resolvedPct}%` : "",
@@ -305,6 +306,14 @@ export default function Agents() {
                 </th>
                 <th
                   className="px-4 py-3 font-semibold cursor-pointer select-none hover:text-slate-700 dark:hover:text-zinc-200 transition-colors"
+                  onClick={() => toggleSort("totalDuration")}
+                >
+                  <span className="flex items-center gap-1">
+                    Total Duration <SortIcon col="totalDuration" />
+                  </span>
+                </th>
+                <th
+                  className="px-4 py-3 font-semibold cursor-pointer select-none hover:text-slate-700 dark:hover:text-zinc-200 transition-colors"
                   onClick={() => toggleSort("avgScore")}
                 >
                   <span className="flex items-center gap-1">
@@ -366,6 +375,9 @@ export default function Agents() {
                   </td>
                   <td className="px-4 py-3 text-slate-600 dark:text-zinc-300 tabular-nums">
                     {fmt(metrics[agent.agent_number]?.avgDuration)}
+                  </td>
+                  <td className="px-4 py-3 text-slate-600 dark:text-zinc-300 tabular-nums">
+                    {fmt(metrics[agent.agent_number]?.totalDuration)}
                   </td>
                   <td className="px-4 py-3 tabular-nums">
                     {(() => {

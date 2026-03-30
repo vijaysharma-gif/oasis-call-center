@@ -41,6 +41,26 @@ body {
   background: #52525b;
 }
 
+/* ── Smooth data update animations ── */
+
+/* Bar chart grow */
+@keyframes barGrow {
+  from { width: 0; }
+}
+
+.animate-bar {
+  animation: barGrow 0.8s ease-out both;
+}
+
+/* Donut segment animate */
+@keyframes donutDraw {
+  from { stroke-dashoffset: var(--circumference, 283); }
+}
+
+.animate-donut {
+  animation: donutDraw 0.8s ease-out both;
+}
+
 /* Highlight animation for AI Analysis row */
 @keyframes highlight-pulse {
   0%   { background-color: rgb(99 102 241 / 0.25); }

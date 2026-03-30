@@ -52,9 +52,10 @@ router.get('/metrics', async (req, res) => {
   const callRows = await db.collection('calls').aggregate([
     { $match: { agent_number: { $exists: true, $ne: '' }, agent_answer_time: { $exists: true, $ne: '' } } },
     { $group: {
-      _id:         '$agent_number',
-      received:    { $sum: 1 },
-      avgDuration: { $avg: '$duration' },
+      _id:           '$agent_number',
+      received:      { $sum: 1 },
+      avgDuration:   { $avg: '$duration' },
+      totalDuration: { $sum: '$duration' },
     }},
   ]).toArray();
 
@@ -88,7 +89,7 @@ router.get('/metrics', async (req, res) => {
 
   const metrics = {};
   for (const r of callRows) {
-    metrics[r._id] = { received: r.received, avgDuration: Math.round(r.avgDuration) };
+    metrics[r._id] = { received: r.received, avgDuration: Math.round(r.avgDuration), totalDuration: r.totalDuration || 0 };
   }
   for (const r of analysisRows) {
     if (!metrics[r._id]) metrics[r._id] = {};

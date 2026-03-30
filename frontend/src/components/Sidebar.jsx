@@ -64,7 +64,7 @@ const NAV = [
 ];
 
 export default function Sidebar({ activePage, onNavigate }) {
-  const { user, logout, isAgent } = useAuth();
+  const { user, logout } = useAuth();
   const { theme, setTheme } = useTheme();
   const [collapsed,   setCollapsed]   = useState(false);
   const [mobileOpen,  setMobileOpen]  = useState(false);
@@ -92,7 +92,15 @@ export default function Sidebar({ activePage, onNavigate }) {
   const sidebarContent = (
     <div className="flex flex-col h-full">
       {/* Brand */}
-      <div className={`flex items-center gap-3 px-3 py-4 border-b border-slate-200 dark:border-zinc-800 ${collapsed ? 'justify-center' : ''}`}>
+      <div className={`relative flex items-center gap-3 px-3 py-4 border-b border-slate-200 dark:border-zinc-800 overflow-visible ${collapsed ? 'justify-center' : ''}`}>
+        <button
+          onClick={() => setCollapsed(c => !c)}
+          className="hidden lg:flex absolute -bottom-3 -right-3 w-6 h-6 rounded-full bg-white dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 shadow-sm items-center justify-center text-slate-400 dark:text-zinc-500 hover:text-slate-600 dark:hover:text-zinc-300 hover:bg-slate-50 dark:hover:bg-zinc-700 transition-colors z-30"
+        >
+          <svg className={`w-3 h-3 transition-transform ${collapsed ? 'rotate-180' : ''}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10 3L5 8l5 5"/>
+          </svg>
+        </button>
         <div className="w-8 h-8 shrink-0 rounded-lg bg-indigo-600 flex items-center justify-center">
           <svg className="w-4 h-4 text-white" viewBox="0 0 16 16" fill="currentColor">
             <path d="M2 2h5v5H2V2zm7 0h5v5H9V2zM2 9h5v5H2V9zm7 0h5v5H9V9z"/>
@@ -112,7 +120,7 @@ export default function Sidebar({ activePage, onNavigate }) {
       </nav>
 
       {/* User info + logout */}
-      <div className={`p-2 border-t border-slate-200 dark:border-zinc-800 space-y-1`}>
+      <div className="p-2 border-t border-slate-200 dark:border-zinc-800 space-y-1">
         {!collapsed && user && (
           <div className="px-3 py-2 rounded-lg bg-slate-50 dark:bg-zinc-800/50">
             <p className="text-xs font-medium text-slate-700 dark:text-zinc-200 truncate">{user.name}</p>
@@ -140,7 +148,7 @@ export default function Sidebar({ activePage, onNavigate }) {
           {!collapsed && <span>Sign out</span>}
         </button>
 
-        {!collapsed && <p className="text-center text-[10px] text-slate-300 dark:text-zinc-700 py-1">v2.2.2</p>}
+        {!collapsed && <p className="text-center text-[10px] text-slate-300 dark:text-zinc-700 py-1">v2.2.3</p>}
       </div>
     </div>
   );
@@ -179,14 +187,6 @@ export default function Sidebar({ activePage, onNavigate }) {
       {/* ── Desktop sidebar ── */}
       <aside className={`hidden lg:flex flex-col fixed top-0 left-0 h-full bg-white dark:bg-zinc-900 border-r border-slate-200 dark:border-zinc-800 transition-all duration-200 z-20 ${collapsed ? 'w-[60px]' : 'w-56'}`}>
         {sidebarContent}
-        <button
-          onClick={() => setCollapsed(c => !c)}
-          className="absolute top-1/2 -translate-y-1/2 -right-3 w-6 h-6 rounded-full bg-white dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 shadow-sm flex items-center justify-center text-slate-400 dark:text-zinc-500 hover:text-slate-600 dark:hover:text-zinc-300 hover:bg-slate-50 dark:hover:bg-zinc-700 transition-colors"
-        >
-          <svg className={`w-3 h-3 transition-transform ${collapsed ? 'rotate-180' : ''}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M10 3L5 8l5 5"/>
-          </svg>
-        </button>
       </aside>
 
       {/* Spacer */}
