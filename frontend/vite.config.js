@@ -6,7 +6,6 @@ export default defineConfig({
   plugins: [tailwindcss(), react()],
   server: {
     historyApiFallback: true,
-    allowedHosts: true,
   },
   test: {
     environment: "jsdom",

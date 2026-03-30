@@ -270,7 +270,7 @@ router.get('/stats/summary', async (req, res) => {
       { $group: { _id: '$_id.category', insights: { $push: { insight: '$_id.insight', count: '$count' } } } },
     ]).toArray(),
     db.collection('call_analysis').aggregate([
-      { $match: { status: 'completed', bug_category: { $exists: true, $nin: [null, '', '-', 'Uncategorised'] } } },
+      { $match: { status: 'completed', bug_category: { $exists: true, $nin: [null, '', '-', 'Uncategorised'] }, ...dateRangeFilter } },
       { $group: { _id: '$bug_category', count: { $sum: 1 } } },
       { $sort: { count: -1 } },
       { $limit: 10 },
