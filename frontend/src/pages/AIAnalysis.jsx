@@ -276,7 +276,7 @@ export default function AIAnalysis() {
           <select
             value={callCategory}
             onChange={e => { setCallCategory(e.target.value); setPage(1); }}
-            className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 transition-colors"
+            className={`px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm font-medium focus:outline-none transition-colors ${callCategory ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-900 dark:text-white'}`}
           >
             <option value="">All Call Categories</option>
             {callCategories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -286,7 +286,7 @@ export default function AIAnalysis() {
           <select
             value={category}
             onChange={e => { setCategory(e.target.value); setPage(1); }}
-            className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 transition-colors"
+            className={`px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm font-medium focus:outline-none transition-colors ${category ? 'text-violet-600 dark:text-violet-400' : 'text-slate-900 dark:text-white'}`}
           >
             <option value="">All Sub-Categories</option>
             {categories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -309,7 +309,7 @@ export default function AIAnalysis() {
           <select
             value={bugCategory}
             onChange={e => { setBugCategory(e.target.value); setPage(1); }}
-            className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 transition-colors"
+            className={`px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm font-medium focus:outline-none transition-colors ${bugCategory ? 'text-red-600 dark:text-red-400' : 'text-slate-900 dark:text-white'}`}
           >
             <option value="">All Bug Types</option>
             {bugCategories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -323,7 +323,7 @@ export default function AIAnalysis() {
             value={effectiveFrom}
             max={effectiveTo}
             onChange={e => { setDateFrom(e.target.value); setPage(1); }}
-            className="px-2 py-1.5 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-xs text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
+            className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-sm text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
           />
         </div>
         <div className="flex items-center gap-1.5">
@@ -333,7 +333,7 @@ export default function AIAnalysis() {
             value={effectiveTo}
             min={effectiveFrom}
             onChange={e => { setDateTo(e.target.value); setPage(1); }}
-            className="px-2 py-1.5 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-xs text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
+            className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-sm text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
           />
         </div>
         {isDateFiltered && (

@@ -93,7 +93,7 @@ function TicketDonut({ stats }) {
               strokeDashoffset={-offset}
               transform="rotate(-90 60 60)"
               className="animate-donut"
-              style={{ '--circumference': C }}
+              style={{ "--circumference": C }}
             />
           );
           offset += dash;
@@ -134,30 +134,32 @@ function TicketIcon() {
 }
 
 function AnimatedNumber({ value, duration = 1000, format }) {
-  const num = typeof value === 'number' ? value : parseInt(value) || 0;
-  const [display, setDisplay] = useState(0);
-  const prev = useRef(0);
+  const num = typeof value === "number" ? value : parseInt(value) || 0;
+  const [display, setDisplay] = useState(num);
+  const prev = useRef(num);
 
   useEffect(() => {
     const from = prev.current;
     const to = num;
-    if (from === to) { setDisplay(to); return; }
+    if (from === to) return;
     const start = performance.now();
+    let raf;
     const step = (now) => {
       const t = Math.min((now - start) / duration, 1);
-      const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; // ease-in-out cubic
+      const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
       setDisplay(Math.round(from + (to - from) * ease));
-      if (t < 1) requestAnimationFrame(step);
+      if (t < 1) raf = requestAnimationFrame(step);
     };
-    requestAnimationFrame(step);
+    raf = requestAnimationFrame(step);
     prev.current = to;
+    return () => cancelAnimationFrame(raf);
   }, [num, duration]);
 
-  return format ? format(display) : display.toLocaleString('en-IN');
+  return format ? format(display) : display.toLocaleString("en-IN");
 }
 
 function StatCard({ label, value, rawSeconds, color, icon }) {
-  const isNum = typeof value === 'number' || /^\d+$/.test(value);
+  const isNum = typeof value === "number" || /^\d+$/.test(value);
   return (
     <div className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800 rounded-xl px-4 py-4 transition-colors">
       <div className="flex items-center justify-between mb-2">
@@ -167,9 +169,13 @@ function StatCard({ label, value, rawSeconds, color, icon }) {
         <span className="text-slate-300 dark:text-zinc-700">{icon}</span>
       </div>
       <p className={`text-2xl font-bold ${color}`}>
-        {rawSeconds != null
-          ? <AnimatedNumber value={rawSeconds} format={v => fmtDuration(v)} />
-          : isNum ? <AnimatedNumber value={value} /> : value}
+        {rawSeconds != null ? (
+          <AnimatedNumber value={rawSeconds} format={(v) => fmtDuration(v)} />
+        ) : isNum ? (
+          <AnimatedNumber value={value} />
+        ) : (
+          value
+        )}
       </p>
     </div>
   );
@@ -516,7 +522,10 @@ export default function Dashboard({ onNavigate }) {
                 Avg Call Duration
               </p>
               <span className="text-2xl font-extrabold text-violet-600 dark:text-violet-400">
-                <AnimatedNumber value={s.avgDuration} format={v => fmtDuration(v)} />
+                <AnimatedNumber
+                  value={s.avgDuration}
+                  format={(v) => fmtDuration(v)}
+                />
               </span>
             </div>
             <p className="text-xs text-slate-400 dark:text-zinc-500 mb-2 uppercase tracking-wide">
@@ -551,7 +560,11 @@ export default function Dashboard({ onNavigate }) {
                           {a.agent_name}
                         </span>
                         <span className="text-xs font-semibold text-violet-600 dark:text-violet-400 shrink-0 ml-2">
-                          <AnimatedNumber value={a.avgDuration} format={v => fmtDuration(v)} duration={800} />
+                          <AnimatedNumber
+                            value={a.avgDuration}
+                            format={(v) => fmtDuration(v)}
+                            duration={800}
+                          />
                         </span>
                       </div>
                       <div className="h-1.5 bg-slate-100 dark:bg-zinc-800 rounded-full overflow-hidden">
@@ -664,8 +677,7 @@ export default function Dashboard({ onNavigate }) {
                   </button>
                 )}
               </div>
-              <TopBugsList items={s.topBugs ?? []}
-              />
+              <TopBugsList items={s.topBugs ?? []} />
             </>
           ) : (
             <>
@@ -879,14 +891,28 @@ function TopBugsList({ items }) {
   return (
     <div className="flex-1 overflow-y-auto space-y-4">
       {items.map((item, i) => (
-        <div key={item.category} className="flex items-center gap-3 animate-fade-in" style={{ animationDelay: `${i * 50}ms` }}>
+        <div
+          key={item.category}
+          className="flex items-center gap-3 animate-fade-in"
+          style={{ animationDelay: `${i * 50}ms` }}
+        >
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between mb-1">
-              <span className="text-xs font-medium text-red-600 dark:text-red-400 truncate">{item.category}</span>
-              <span className="text-xs font-bold text-slate-700 dark:text-zinc-200 shrink-0 ml-2"><AnimatedNumber value={item.count} duration={400} /></span>
+              <span className="text-xs font-medium text-red-600 dark:text-red-400 truncate">
+                {item.category}
+              </span>
+              <span className="text-xs font-bold text-slate-700 dark:text-zinc-200 shrink-0 ml-2">
+                <AnimatedNumber value={item.count} duration={400} />
+              </span>
             </div>
             <div className="w-full h-1.5 rounded-full bg-slate-100 dark:bg-zinc-800">
-              <div className="h-full rounded-full bg-red-400 dark:bg-red-500 animate-bar" style={{ width: `${Math.round((item.count / maxCount) * 100)}%`, animationDelay: `${i * 50 + 100}ms` }} />
+              <div
+                className="h-full rounded-full bg-red-400 dark:bg-red-500 animate-bar"
+                style={{
+                  width: `${Math.round((item.count / maxCount) * 100)}%`,
+                  animationDelay: `${i * 50 + 100}ms`,
+                }}
+              />
             </div>
           </div>
         </div>

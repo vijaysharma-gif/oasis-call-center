@@ -3,12 +3,24 @@ import { useAuth } from '../contexts/AuthContext';
 import { useDateRange, useAgentMap } from '../hooks/useCalls';
 import TicketDetailModal, { STATUS_STYLE, PRIORITY_STYLE, fmtDate, Badge } from '../components/TicketDetailModal';
 import Pagination from '../components/Pagination';
+import ColorSelect from '../components/ColorSelect';
 
 const API = import.meta.env.VITE_API_URL ?? '';
 
-const STATUS_OPTS   = ['', 'Open', 'In Progress', 'Resolved', 'Closed'];
-const PRIORITY_OPTS = ['', 'Low', 'Medium', 'High', 'Urgent'];
-const CATEGORY_OPTS = ['', 'General Inquiry', 'Technical Issue', 'Billing', 'Complaint', 'Service Request', 'Follow Up', 'Others'];
+const STATUS_COLORS = {
+  'Open':        'text-amber-600 dark:text-amber-400',
+  'In Progress': 'text-sky-600 dark:text-sky-400',
+  'Resolved':    'text-emerald-600 dark:text-emerald-400',
+  'Closed':      'text-slate-500 dark:text-zinc-400',
+};
+
+const PRIORITY_COLORS = {
+  'Low':    'text-slate-500 dark:text-zinc-400',
+  'Medium': 'text-amber-600 dark:text-amber-400',
+  'High':   'text-orange-600 dark:text-orange-400',
+  'Urgent': 'text-red-600 dark:text-red-400',
+};
+
 
 /* ──────────────────────────────────────────────────────────── */
 /* Tickets Page                                                 */
@@ -95,27 +107,42 @@ export default function Tickets() {
             className="w-full pl-9 pr-4 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-zinc-500 focus:outline-none focus:border-indigo-500 transition-colors"
           />
         </div>
-        <select
+        <ColorSelect
           value={statusFilter}
-          onChange={e => { setStatusFilter(e.target.value); setPage(1); }}
-          className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 transition-colors"
-        >
-          {STATUS_OPTS.map(s => <option key={s} value={s}>{s || 'All Statuses'}</option>)}
-        </select>
-        <select
+          onChange={v => { setStatusFilter(v); setPage(1); }}
+          options={[
+            { value: '', label: 'All Statuses' },
+            { value: 'Open', label: 'Open', dot: 'bg-amber-500' },
+            { value: 'In Progress', label: 'In Progress', dot: 'bg-sky-500' },
+            { value: 'Resolved', label: 'Resolved', dot: 'bg-emerald-500' },
+            { value: 'Closed', label: 'Closed', dot: 'bg-slate-400' },
+          ]}
+          placeholder="All Statuses"
+          colorMap={STATUS_COLORS}
+        />
+        <ColorSelect
           value={priorityFilter}
-          onChange={e => { setPriorityFilter(e.target.value); setPage(1); }}
-          className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 transition-colors"
-        >
-          {PRIORITY_OPTS.map(p => <option key={p} value={p}>{p || 'All Priorities'}</option>)}
-        </select>
-        <select
+          onChange={v => { setPriorityFilter(v); setPage(1); }}
+          options={[
+            { value: '', label: 'All Priorities' },
+            { value: 'Low', label: 'Low', dot: 'bg-slate-400' },
+            { value: 'Medium', label: 'Medium', dot: 'bg-amber-500' },
+            { value: 'High', label: 'High', dot: 'bg-orange-500' },
+            { value: 'Urgent', label: 'Urgent', dot: 'bg-red-500' },
+          ]}
+          placeholder="All Priorities"
+          colorMap={PRIORITY_COLORS}
+        />
+        <ColorSelect
           value={categoryFilter}
-          onChange={e => { setCategoryFilter(e.target.value); setPage(1); }}
-          className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-700 rounded-lg text-sm text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500 transition-colors"
-        >
-          {CATEGORY_OPTS.map(c => <option key={c} value={c}>{c || 'All Categories'}</option>)}
-        </select>
+          onChange={v => { setCategoryFilter(v); setPage(1); }}
+          options={[
+            { value: '', label: 'All Categories' },
+            ...['General Inquiry', 'Technical Issue', 'Billing', 'Complaint', 'Service Request', 'Follow Up', 'Others'].map(c => ({ value: c, label: c })),
+          ]}
+          placeholder="All Categories"
+          colorMap={{}}
+        />
         <svg className="w-4 h-4 text-slate-400 dark:text-zinc-500 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M5 1v4M11 1v4M2 7h12"/></svg>
         <div className="flex items-center gap-1.5">
           <label className="text-xs text-slate-400 dark:text-zinc-500 shrink-0">From</label>
@@ -124,7 +151,7 @@ export default function Tickets() {
             value={effectiveFrom}
             max={effectiveTo}
             onChange={e => { setDateFrom(e.target.value); setPage(1); }}
-            className="px-2 py-1.5 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-xs text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
+            className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-sm text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
           />
         </div>
         <div className="flex items-center gap-1.5">
@@ -134,7 +161,7 @@ export default function Tickets() {
             value={effectiveTo}
             min={effectiveFrom}
             onChange={e => { setDateTo(e.target.value); setPage(1); }}
-            className="px-2 py-1.5 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-xs text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
+            className="px-3 py-2 bg-white dark:bg-zinc-900 border border-slate-300 dark:border-zinc-600 rounded-lg text-sm text-slate-800 dark:text-zinc-200 focus:outline-none focus:border-indigo-500 transition-colors"
           />
         </div>
         {isDateFiltered && (

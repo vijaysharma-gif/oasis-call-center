@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { useCalls, useDateRange, useAgentMap } from '../hooks/useCalls';
 import { useAuth } from '../contexts/AuthContext';
 import CallsTable from '../components/CallsTable';
@@ -10,10 +10,49 @@ import Pagination from '../components/Pagination';
 const API = import.meta.env.VITE_API_URL ?? '';
 
 const STATUS_TABS = [
-  { value: '',         label: 'All'      },
-  { value: 'received', label: 'Received' },
-  { value: 'missed',   label: 'Missed'   },
+  { value: '',         label: 'All',      bg: ['#ffffff', '#3f3f46'], text: 'text-slate-900 dark:text-zinc-100' },
+  { value: 'received', label: 'Received', bg: ['#d1fae5', 'rgba(6,78,59,0.4)'], text: 'text-emerald-700 dark:text-emerald-400' },
+  { value: 'missed',   label: 'Missed',   bg: ['#fee2e2', 'rgba(127,29,29,0.4)'], text: 'text-red-700 dark:text-red-400' },
 ];
+
+function StatusTabs({ status, onStatus }) {
+  const sliderRef = useRef(null);
+  const tabRefs = useRef({});
+  const activeTab = STATUS_TABS.find(t => t.value === status) || STATUS_TABS[0];
+  const isDark = document.documentElement.classList.contains('dark');
+
+  useLayoutEffect(() => {
+    const el = tabRefs.current[status];
+    const slider = sliderRef.current;
+    if (el && slider) {
+      slider.style.transform = `translateX(${el.offsetLeft}px)`;
+      slider.style.width = `${el.offsetWidth}px`;
+      slider.style.backgroundColor = activeTab.bg[isDark ? 1 : 0];
+    }
+  }, [status, activeTab, isDark]);
+
+  return (
+    <div className="relative flex gap-1 bg-slate-100 dark:bg-zinc-800/60 rounded-lg p-1">
+      <div
+        ref={sliderRef}
+        className="absolute top-1 bottom-1 left-0 rounded-md shadow-sm will-change-transform"
+        style={{ transition: 'transform 300ms cubic-bezier(0.4,0,0.2,1), width 300ms cubic-bezier(0.4,0,0.2,1), background-color 300ms cubic-bezier(0.4,0,0.2,1)' }}
+      />
+      {STATUS_TABS.map(tab => (
+        <button
+          key={tab.value}
+          ref={el => { tabRefs.current[tab.value] = el; }}
+          onClick={() => onStatus(tab.value)}
+          className={`relative z-10 px-3 py-1.5 rounded-md text-sm font-medium transition-colors duration-300 whitespace-nowrap ${
+            status === tab.value ? tab.text : 'text-slate-500 dark:text-zinc-400 hover:text-slate-700 dark:hover:text-zinc-200'
+          }`}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export default function CallReport() {
   const [search,      setSearch]      = useState('');
@@ -167,9 +206,9 @@ export default function CallReport() {
         </div>
       </div>
 
-      {/* Filters row */}
+      {/* Filters */}
       <div className="flex items-center gap-2 mb-4 flex-wrap">
-        <div className="relative flex-1 min-w-[180px] max-w-xs">
+        <div className="relative flex-1 min-w-[160px] max-w-xs">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-zinc-500 pointer-events-none" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="6.5" cy="6.5" r="4.5"/><path d="M10.5 10.5l3 3"/>
           </svg>
@@ -193,22 +232,8 @@ export default function CallReport() {
             ))}
           </select>
         )}
-        <div className="flex gap-1 bg-slate-100 dark:bg-zinc-800/60 rounded-lg p-1">
-          {STATUS_TABS.map(tab => (
-            <button
-              key={tab.value}
-              onClick={() => handleStatus(tab.value)}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors whitespace-nowrap ${
-                status === tab.value
-                  ? 'bg-white dark:bg-zinc-700 text-slate-900 dark:text-zinc-100 shadow-sm'
-                  : 'text-slate-500 dark:text-zinc-400 hover:text-slate-700 dark:hover:text-zinc-200'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-        <svg className="w-4 h-4 text-slate-400 dark:text-zinc-500 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M5 1v4M11 1v4M2 7h12"/></svg>
+        <StatusTabs status={status} onStatus={handleStatus} />
+        <svg className="w-4 h-4 text-slate-400 dark:text-zinc-500 shrink-0 hidden sm:block" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M5 1v4M11 1v4M2 7h12"/></svg>
         <div className="flex items-center gap-1.5">
           <label className="text-xs text-slate-400 dark:text-zinc-500 shrink-0">From</label>
           <input
@@ -236,9 +261,6 @@ export default function CallReport() {
           >
             Reset
           </button>
-        )}
-        {isFiltered && (
-          <span className="text-xs text-indigo-600 dark:text-indigo-400 font-medium">Filtered</span>
         )}
         <button
           onClick={handleExport}

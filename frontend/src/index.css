@@ -2,7 +2,9 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -41,11 +43,45 @@ body {
   background: #52525b;
 }
 
+/* ── Date input fixes ── */
+input[type="date"] {
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 5.5rem;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  display: none;
+}
+
+input[type="date"]::-webkit-datetime-edit {
+  padding: 0;
+}
+
+input[type="date"]::-webkit-datetime-edit-fields-wrapper {
+  padding: 0;
+}
+
+input[type="date"]::-webkit-inner-spin-button {
+  display: none;
+}
+
+.dark input[type="date"] {
+  color-scheme: dark;
+}
+
+.dark input[type="date"] {
+  color-scheme: dark;
+}
+
 /* ── Smooth data update animations ── */
 
 /* Bar chart grow */
 @keyframes barGrow {
-  from { width: 0; }
+  from {
+    width: 0;
+  }
 }
 
 .animate-bar {
@@ -54,7 +90,9 @@ body {
 
 /* Donut segment animate */
 @keyframes donutDraw {
-  from { stroke-dashoffset: var(--circumference, 283); }
+  from {
+    stroke-dashoffset: var(--circumference, 283);
+  }
 }
 
 .animate-donut {
@@ -63,9 +101,15 @@ body {
 
 /* Highlight animation for AI Analysis row */
 @keyframes highlight-pulse {
-  0%   { background-color: rgb(99 102 241 / 0.25); }
-  50%  { background-color: rgb(99 102 241 / 0.1); }
-  100% { background-color: rgb(99 102 241 / 0.25); }
+  0% {
+    background-color: rgb(99 102 241 / 0.25);
+  }
+  50% {
+    background-color: rgb(99 102 241 / 0.1);
+  }
+  100% {
+    background-color: rgb(99 102 241 / 0.25);
+  }
 }
 
 .animate-highlight {
