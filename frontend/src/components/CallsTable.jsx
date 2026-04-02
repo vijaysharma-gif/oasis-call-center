@@ -256,16 +256,16 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                       <div className="mt-1">
                         {hasAgents ? (
                           station.agents.map((a, i) => (
-                            <p key={i} className="flex items-center gap-1 text-xs text-slate-500 dark:text-zinc-400">
-                              {a.name} · {a.mobile}
-                              <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 ml-1">TEMP</span>
-                            </p>
+                            <div key={i}>
+                              <p className="text-xs text-slate-500 dark:text-zinc-400">{a.name} · {a.mobile}</p>
+                              <span className="text-[9px] font-bold uppercase text-amber-600 dark:text-amber-400">Temp Staff</span>
+                            </div>
                           ))
                         ) : (
-                          <p className="flex items-center gap-1 text-xs text-slate-500 dark:text-zinc-400">
-                            {station.station_name} · {call.agent_number || '—'}
-                            <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 ml-1">TEMP</span>
-                          </p>
+                          <div>
+                            <p className="text-xs text-slate-500 dark:text-zinc-400">{station.station_name} · {call.agent_number || '—'}</p>
+                            <span className="text-[9px] font-bold uppercase text-indigo-600 dark:text-indigo-400">STATION</span>
+                          </div>
                         )}
                       </div>
                     );
@@ -395,9 +395,15 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                           <td className="px-3 py-2 text-slate-700 dark:text-zinc-300">
                             <div>
                               {hasAgents ? station.agents.map((a, i) => (
-                                <p key={i} className="flex items-center gap-1 text-sm">{a.name} <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">TEMP</span></p>
+                                <div key={i}>
+                                  <p className="text-sm">{a.name}</p>
+                                  <span className="text-[9px] font-bold uppercase text-amber-600 dark:text-amber-400">Temp Staff</span>
+                                </div>
                               )) : (
-                                <p className="flex items-center gap-1 text-sm">{station.station_name} <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">TEMP</span></p>
+                                <div>
+                                  <p className="text-sm">{station.station_name}</p>
+                                  <span className="text-[9px] font-bold uppercase text-indigo-600 dark:text-indigo-400">STATION</span>
+                                </div>
                               )}
                             </div>
                           </td>

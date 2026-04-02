@@ -158,7 +158,7 @@ export default function Sidebar({ activePage, onNavigate }) {
           {!collapsed && <span>Sign out</span>}
         </button>
 
-        {!collapsed && <p className="text-center text-[10px] text-slate-300 dark:text-zinc-700 py-1">v2.3.0</p>}
+        {!collapsed && <p className="text-center text-[10px] text-slate-300 dark:text-zinc-700 py-1">v3.0.0</p>}
       </div>
     </div>
   );
