@@ -14,6 +14,19 @@ function today() {
   return toDateOnly(new Date().toISOString());
 }
 
+// Returns { [station_number]: { station_name, agents } }
+export function useStationMap(token) {
+  const [stationMap, setStationMap] = useState({});
+  useEffect(() => {
+    if (!token) return;
+    fetch(`${API}/api/stations/lookup`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => setStationMap(data.stations ?? {}))
+      .catch(() => {});
+  }, [token]);
+  return stationMap;
+}
+
 // Returns { [agent_number]: name } for all registered agents (admin only)
 export function useAgentMap(token, isAdmin) {
   const [agentMap, setAgentMap] = useState({});

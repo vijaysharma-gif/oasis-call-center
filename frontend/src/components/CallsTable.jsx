@@ -86,7 +86,18 @@ function TicketBtn({ onClick }) {
   );
 }
 
-export default function CallsTable({ calls, hasFilters = false, isAgent = false, agentNumber, agentMap = {}, token, onCreateTicket, sortBy, sortDir, onSort }) {
+function normalizeNum(n) { return (n || '').replace(/\D/g, '').slice(-10); }
+
+function resolveStation(number, stationMap) {
+  if (!number || !stationMap) return null;
+  const norm = normalizeNum(number);
+  for (const [sNum, info] of Object.entries(stationMap)) {
+    if (normalizeNum(sNum) === norm) return info;
+  }
+  return null;
+}
+
+export default function CallsTable({ calls, hasFilters = false, isAgent = false, agentNumber, agentMap = {}, stationMap = {}, token, onCreateTicket, sortBy, sortDir, onSort }) {
   const [transcriptCall, setTranscriptCall] = useState(null);
   const [dialState,      setDialState]      = useState({});  // { [call.id]: 'loading'|'success'|'error' }
 
@@ -237,12 +248,35 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                     )}
                   </div>
                 </div>
-                {!isAgent && (
-                  <p className="flex items-center gap-1 text-xs text-slate-500 dark:text-zinc-400 mt-1">
-                    {agentMap[call.agent_number] && <VerifiedIcon />}
-                    {agentMap[call.agent_number] || call.agent_name || '—'} · {call.agent_number || '—'}
-                  </p>
-                )}
+                {!isAgent && (() => {
+                  const station = resolveStation(call.agent_number, stationMap);
+                  if (station) {
+                    const hasAgents = station.agents?.length > 0;
+                    return (
+                      <div className="mt-1">
+                        {hasAgents ? (
+                          station.agents.map((a, i) => (
+                            <p key={i} className="flex items-center gap-1 text-xs text-slate-500 dark:text-zinc-400">
+                              {a.name} · {a.mobile}
+                              <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 ml-1">TEMP</span>
+                            </p>
+                          ))
+                        ) : (
+                          <p className="flex items-center gap-1 text-xs text-slate-500 dark:text-zinc-400">
+                            {station.station_name} · {call.agent_number || '—'}
+                            <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 ml-1">TEMP</span>
+                          </p>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <p className="flex items-center gap-1 text-xs text-slate-500 dark:text-zinc-400 mt-1">
+                      {agentMap[call.agent_number] && <VerifiedIcon />}
+                      {agentMap[call.agent_number] || call.agent_name || '—'} · {call.agent_number || '—'}
+                    </p>
+                  );
+                })()}
               </div>
               <div className="flex items-center gap-1.5">
                 <StatusBadge call={call} />
@@ -352,15 +386,39 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                       )}
                     </div>
                   </td>
-                  {!isAgent && (
-                    <td className="px-3 py-2 text-slate-700 dark:text-zinc-300 whitespace-nowrap">
-                      <span className="flex items-center gap-1">
-                        {agentMap[call.agent_number] && <VerifiedIcon />}
-                        {agentMap[call.agent_number] || call.agent_name || '—'}
-                      </span>
-                    </td>
-                  )}
-                  {!isAgent && <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 tabular-nums">{call.agent_number || '—'}</td>}
+                  {!isAgent && (() => {
+                    const station = resolveStation(call.agent_number, stationMap);
+                    if (station) {
+                      const hasAgents = station.agents?.length > 0;
+                      return (
+                        <>
+                          <td className="px-3 py-2 text-slate-700 dark:text-zinc-300">
+                            <div>
+                              {hasAgents ? station.agents.map((a, i) => (
+                                <p key={i} className="flex items-center gap-1 text-sm">{a.name} <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">TEMP</span></p>
+                              )) : (
+                                <p className="flex items-center gap-1 text-sm">{station.station_name} <span className="px-1 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">TEMP</span></p>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 tabular-nums">
+                            {hasAgents ? station.agents.map((a, i) => <p key={i}>{a.mobile}</p>) : (call.agent_number || '—')}
+                          </td>
+                        </>
+                      );
+                    }
+                    return (
+                      <>
+                        <td className="px-3 py-2 text-slate-700 dark:text-zinc-300 whitespace-nowrap">
+                          <span className="flex items-center gap-1">
+                            {agentMap[call.agent_number] && <VerifiedIcon />}
+                            {agentMap[call.agent_number] || call.agent_name || '—'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 tabular-nums">{call.agent_number || '—'}</td>
+                      </>
+                    );
+                  })()}
                   <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 whitespace-nowrap text-xs">{formatDate(call.call_start_time || call.created_at)}</td>
                   <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 whitespace-nowrap text-xs">{formatDate(call.agent_answer_time)}</td>
                   <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 whitespace-nowrap text-xs">{formatDate(call.call_end_time)}</td>
