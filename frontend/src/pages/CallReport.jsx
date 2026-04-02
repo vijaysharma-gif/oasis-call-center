@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useLayoutEffect } from 'react';
-import { useCalls, useDateRange, useAgentMap, useStationMap } from '../hooks/useCalls';
+import { useCalls, useDateRange, useAgentMap } from '../hooks/useCalls';
 import { useAuth } from '../contexts/AuthContext';
 import CallsTable from '../components/CallsTable';
 import CallTicketModal from '../components/CallTicketModal';
@@ -71,7 +71,6 @@ export default function CallReport() {
   const { token, isAdmin, user } = useAuth();
   const { minDate, maxDate }    = useDateRange(token);
   const agentMap                = useAgentMap(token, isAdmin);
-  const stationMap              = useStationMap(token);
 
   // Fetch agent list for admin dropdown
   useEffect(() => {
@@ -294,7 +293,6 @@ export default function CallReport() {
           isAgent={!isAdmin}
           agentNumber={user?.agent_number}
           agentMap={agentMap}
-          stationMap={stationMap}
           token={token}
           onCreateTicket={call => setTicketCall(call)}
           sortBy={sortBy}

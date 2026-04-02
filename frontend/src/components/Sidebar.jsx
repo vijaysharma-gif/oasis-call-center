@@ -54,20 +54,10 @@ const NAV = [
   {
     id: 'agents',
     label: 'Agents',
-    roles: ['admin'],
+    roles: ['admin'],             // agents cannot see this
     icon: (
       <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
         <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906zM10 13a4 4 0 014 4v1H6v-1a4 4 0 014-4z"/>
-      </svg>
-    ),
-  },
-  {
-    id: 'stations',
-    label: 'Stations',
-    roles: ['admin'],
-    icon: (
-      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6A19.79 19.79 0 012.12 4.18 2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>
       </svg>
     ),
   },
@@ -158,7 +148,7 @@ export default function Sidebar({ activePage, onNavigate }) {
           {!collapsed && <span>Sign out</span>}
         </button>
 
-        {!collapsed && <p className="text-center text-[10px] text-slate-300 dark:text-zinc-700 py-1">v2.3.0</p>}
+        {!collapsed && <p className="text-center text-[10px] text-slate-300 dark:text-zinc-700 py-1">v2.2.5</p>}
       </div>
     </div>
   );
