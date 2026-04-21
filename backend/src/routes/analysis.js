@@ -65,6 +65,96 @@ function canAccessJob(job, user) {
   return job.requested_by?.agent_number && user?.agent_number && job.requested_by.agent_number === user.agent_number;
 }
 
+// GET /api/analysis/queue-stats — snapshot of the analysis pipeline.
+// Returns counts by status plus useful breakdowns for the pending bucket.
+// Admin-only because this reveals operational/internal state.
+router.get('/queue-stats', requireAdmin, async (req, res) => {
+  const db = await getDb();
+  const col = db.collection('call_analysis');
+  const now = new Date();
+  const STALE_MS = 15 * 60 * 1000;
+
+  // Single aggregation — one pass over the collection.
+  const [row] = await col.aggregate([
+    {
+      $group: {
+        _id: null,
+        analyzed:   { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+        processing: { $sum: { $cond: [{ $eq: ['$status', 'processing'] }, 1, 0] } },
+        pending:    { $sum: { $cond: [{ $eq: ['$status', 'pending'] }, 1, 0] } },
+        failed:     { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
+        // Pending with a scheduled retry that hasn't elapsed yet
+        retryScheduled: {
+          $sum: {
+            $cond: [
+              { $and: [
+                { $eq: ['$status', 'pending'] },
+                { $ne: ['$next_attempt_at', null] },
+                { $gt: ['$next_attempt_at', now] },
+              ]},
+              1,
+              0,
+            ],
+          },
+        },
+        // Processing records that haven't updated in STALE_MS — likely dead worker
+        stuck: {
+          $sum: {
+            $cond: [
+              { $and: [
+                { $eq: ['$status', 'processing'] },
+                { $lt: ['$updated_at', new Date(now.getTime() - STALE_MS)] },
+              ]},
+              1,
+              0,
+            ],
+          },
+        },
+        // Total attempts (sum across all records) — useful for Gemini usage estimation
+        totalAttempts: { $sum: { $ifNull: ['$attempts', 0] } },
+      },
+    },
+  ]).toArray();
+
+  const stats = row || {};
+  const pending = stats.pending || 0;
+  const retryScheduled = stats.retryScheduled || 0;
+  const readyNow = Math.max(pending - retryScheduled, 0);
+  const analyzed = stats.analyzed || 0;
+  const processing = stats.processing || 0;
+  const failed = stats.failed || 0;
+  const total = analyzed + processing + pending + failed;
+
+  // Timestamps of next retry and oldest pending — helpful for ops visibility
+  const [earliestRetry, oldestPending] = await Promise.all([
+    col.findOne(
+      { status: 'pending', next_attempt_at: { $gt: now } },
+      { projection: { next_attempt_at: 1 }, sort: { next_attempt_at: 1 } }
+    ),
+    col.findOne(
+      { status: 'pending' },
+      { projection: { created_at: 1 }, sort: { created_at: 1 } }
+    ),
+  ]);
+
+  res.json({
+    analyzed,
+    processing,
+    pending,
+    failed,
+    total,
+    queue: {
+      ready_now:       readyNow,
+      retry_scheduled: retryScheduled,
+      stuck:           stats.stuck || 0,
+    },
+    earliest_retry_at: earliestRetry?.next_attempt_at || null,
+    oldest_pending_at: oldestPending?.created_at || null,
+    total_attempts:    stats.totalAttempts || 0,
+    as_of:             now,
+  });
+});
+
 // POST /api/analysis/export/jobs — queue async export
 router.post('/export/jobs', async (req, res) => {
   const filters = pickAnalysisExportFilters(req.body || {});
