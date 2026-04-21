@@ -115,3 +115,13 @@ input[type="date"]::-webkit-inner-spin-button {
 .animate-highlight {
   animation: highlight-pulse 0.8s ease-in-out 3;
 }
+
+/* Export button shimmer — sweeps a subtle highlight across the button while exporting */
+@keyframes export-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-export-shimmer {
+  animation: export-shimmer 1.6s ease-in-out infinite;
+}

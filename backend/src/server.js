@@ -73,7 +73,7 @@ const apiLimiter = rateLimit({
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/auth',          authLimiter, authRouter);
 app.use('/api/calls',         apiLimiter,  callsRouter);
-app.use('/api/analysis',      apiLimiter,  requireAuth, analysisRouter);
+app.use('/api/analysis',      apiLimiter,  analysisRouter);
 app.use('/api/agents',        apiLimiter,  agentsRouter);
 app.use('/api/tickets',       apiLimiter,  ticketsRouter);
 app.use('/api/stations',      apiLimiter,  stationsRouter);

@@ -1,10 +1,12 @@
-import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useCalls, useDateRange, useAgentMap, useStationMap } from '../hooks/useCalls';
+import { useExportJob } from '../hooks/useExportJob';
 import { useAuth } from '../contexts/AuthContext';
 import CallsTable from '../components/CallsTable';
 import CallTicketModal from '../components/CallTicketModal';
 import InitiateCallModal from '../components/InitiateCallModal';
 import Pagination from '../components/Pagination';
+import ExportButton from '../components/ExportButton';
 
 const API = import.meta.env.VITE_API_URL ?? '';
 
@@ -64,20 +66,12 @@ export default function CallReport() {
   const [sortDir,     setSortDir]     = useState('desc');
   const [ticketCall,  setTicketCall]  = useState(null);
   const [showDial,    setShowDial]    = useState(false);
-  const [exporting,   setExporting]   = useState(false);
-  const [exportLabel, setExportLabel] = useState('');
   const [agents,      setAgents]      = useState([]);
   const [pageSize,    setPageSize]    = useState(25);
-  const mountedRef = useRef(true);
   const { token, isAdmin, user } = useAuth();
   const { minDate, maxDate }    = useDateRange(token);
   const agentMap                = useAgentMap(token, isAdmin);
   const stationMap              = useStationMap(token);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
 
   // Fetch agent list for admin dropdown
   useEffect(() => {
@@ -118,94 +112,20 @@ export default function CallReport() {
     setPage(1);
   }
 
-  function wait(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+  const { runExport, exporting, label: exportLabel } = useExportJob({
+    jobsEndpoint: '/api/calls/export/jobs',
+    token,
+    fallbackName: `call-report-${effectiveFrom || 'all'}-to-${effectiveTo || 'all'}.csv`,
+  });
 
-  function fileNameFromDisposition(disposition, fallback) {
-    if (!disposition) return fallback;
-    const m = disposition.match(/filename="?([^";]+)"?/i);
-    return m?.[1] || fallback;
-  }
-
-  async function downloadExport(jobId, fallbackName) {
-    const res = await fetch(`${API}/api/calls/export/jobs/${jobId}/download`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) {
-      let err = 'Failed to download export';
-      try {
-        const data = await res.json();
-        if (data?.error) err = data.error;
-      } catch {
-        // ignore JSON parse errors from non-JSON responses
-      }
-      throw new Error(err);
-    }
-
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = fileNameFromDisposition(res.headers.get('content-disposition'), fallbackName);
-    link.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function handleExport() {
-    setExporting(true);
-    setExportLabel('Queueing export...');
-    try {
-      const payload = {};
-      if (search) payload.search = search;
-      if (status) payload.status = status;
-      if (effectiveFrom) payload.dateFrom = `${effectiveFrom}T00:00`;
-      if (effectiveTo) payload.dateTo = `${effectiveTo}T23:59`;
-      if (agentNumber) payload.agentNumber = agentNumber;
-
-      const createRes = await fetch(`${API}/api/calls/export/jobs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(payload),
-      });
-      const createData = await createRes.json();
-      if (!createRes.ok) throw new Error(createData.error || 'Failed to queue export');
-
-      const jobId = createData.job_id;
-      const fallbackName = `call-report-${effectiveFrom || 'all'}-to-${effectiveTo || 'all'}.csv`;
-
-      for (let i = 0; i < 720; i += 1) {
-        if (!mountedRef.current) return;
-        await wait(2500);
-        const statusRes = await fetch(`${API}/api/calls/export/jobs/${jobId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const statusData = await statusRes.json();
-        if (!statusRes.ok) throw new Error(statusData.error || 'Failed to check export status');
-
-        if (statusData.status === 'completed') {
-          setExportLabel('Downloading...');
-          await downloadExport(jobId, statusData.file_name || fallbackName);
-          setExportLabel('Done');
-          return;
-        }
-        if (statusData.status === 'failed') {
-          throw new Error(statusData.error || 'Export failed');
-        }
-
-        const rows = Number(statusData.rows_processed || 0);
-        setExportLabel(rows > 0 ? `Processing ${rows.toLocaleString()} rows...` : 'Preparing file...');
-      }
-
-      throw new Error('Export timed out. Please narrow your date range and try again.');
-    } catch (e) {
-      alert(`Export failed: ${e.message}`);
-    } finally {
-      if (mountedRef.current) {
-        setExporting(false);
-        setTimeout(() => { if (mountedRef.current) setExportLabel(''); }, 2500);
-      }
-    }
+  function handleExport() {
+    const payload = {};
+    if (search) payload.search = search;
+    if (status) payload.status = status;
+    if (effectiveFrom) payload.dateFrom = `${effectiveFrom}T00:00`;
+    if (effectiveTo) payload.dateTo = `${effectiveTo}T23:59`;
+    if (agentNumber) payload.agentNumber = agentNumber;
+    runExport(payload);
   }
 
   return (
@@ -306,16 +226,7 @@ export default function CallReport() {
             Reset
           </button>
         )}
-        <button
-          onClick={handleExport}
-          disabled={exporting}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-xs font-medium transition-colors disabled:opacity-50 shrink-0 ml-auto"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M8 2v8M5 7l3 3 3-3M2 12v1a1 1 0 001 1h10a1 1 0 001-1v-1"/>
-          </svg>
-          {exporting ? (exportLabel || 'Exporting...') : 'Export CSV'}
-        </button>
+        <ExportButton onClick={handleExport} exporting={exporting} label={exportLabel} className="ml-auto" />
       </div>
 
       {/* Table */}

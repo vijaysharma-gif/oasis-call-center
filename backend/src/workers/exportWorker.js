@@ -61,6 +61,11 @@ function normalizeFilters(raw = {}) {
     dateFrom: pick('dateFrom'),
     dateTo: pick('dateTo'),
     agentNumber: pick('agentNumber'),
+    // Analysis-specific filters
+    category: pick('category'),
+    callCategory: pick('callCategory'),
+    bugCategory: pick('bugCategory'),
+    bugsOnly: pick('bugsOnly'),
   };
 }
 
@@ -125,7 +130,7 @@ async function writeLine(writable, line) {
   ]);
 }
 
-function buildPipeline(filter) {
+function buildCallsPipeline(filter) {
   return [
     { $match: filter },
     { $sort: { created_at: -1 } },
@@ -193,7 +198,7 @@ function buildPipeline(filter) {
   ];
 }
 
-function toCsvRecord(doc) {
+function callsToCsvRecord(doc) {
   const a = doc.analysis || {};
   return {
     'Call ID': doc.call_id || '',
@@ -222,27 +227,168 @@ function toCsvRecord(doc) {
   };
 }
 
-async function streamCsv({ db, filters, user, writable, onProgress }) {
-  const headers = [
-    'Call ID', 'Caller Number', 'Called Number', 'Agent Name', 'Agent Number', 'Status',
-    'Call Start Time', 'Answer Time', 'Call End Time', 'Duration (s)', 'Agent Duration (s)',
-    'Call Category', 'Sub-Category', 'Summary', 'Bug Category', 'Bug Description',
-    'Call Resolved', 'Agent Score', 'Audio Rating', 'Language', 'Recording URL',
-    'Transcription', 'Created At',
+// ─── Analysis export type ────────────────────────────────────────────────────
+
+function buildAnalysisFilter(filters, user) {
+  const { search, dateFrom, dateTo, bugsOnly, bugCategory, callCategory, category } = normalizeFilters(filters);
+  const conditions = [{ status: 'completed' }];
+
+  if (bugsOnly === '1' || bugsOnly === 'true') conditions.push({ bugs: { $exists: true, $nin: ['', '-'] } });
+  if (bugCategory) conditions.push({ bug_category: bugCategory });
+  if (callCategory) conditions.push({ call_category: callCategory });
+  if (category) conditions.push({ category });
+  if (search) {
+    conditions.push({ $or: [
+      { call_id:      { $regex: search, $options: 'i' } },
+      { category:     { $regex: search, $options: 'i' } },
+      { sub_category: { $regex: search, $options: 'i' } },
+      { ai_insight:   { $regex: search, $options: 'i' } },
+    ]});
+  }
+  if (dateFrom || dateTo) {
+    const dc = {};
+    if (dateFrom) dc.$gte = new Date(dateFrom);
+    if (dateTo)   dc.$lte = new Date(dateTo);
+    conditions.push({ created_at: dc });
+  }
+
+  // Agents can only see their own analyses
+  if (user.role === 'agent' && user.agent_number) {
+    // Need to join with calls first to filter by agent — done in pipeline
+  }
+
+  return { $and: conditions };
+}
+
+function buildAnalysisPipeline(filter, user) {
+  const stages = [
+    { $match: filter },
+    { $sort: { created_at: -1 } },
+    {
+      $lookup: {
+        from: 'calls',
+        localField: 'call_id',
+        foreignField: 'call_id',
+        as: 'call_doc',
+      },
+    },
+    { $addFields: { call: { $first: '$call_doc' } } },
   ];
 
-  await writeLine(writable, headers.map(csvEscape).join(',') + '\r\n');
+  if (user.role === 'agent' && user.agent_number) {
+    stages.push({ $match: { 'call.agent_number': user.agent_number } });
+  }
 
-  const filter = buildExportFilter(filters, user);
-  const cursor = db.collection('calls').aggregate(buildPipeline(filter), {
+  stages.push({
+    $project: {
+      _id: 0,
+      call_id: 1,
+      category: 1,
+      sub_category: 1,
+      ai_insight: 1,
+      call_category: 1,
+      bug_category: 1,
+      bugs: 1,
+      summary: 1,
+      agent_score: 1,
+      call_resolved: 1,
+      audio_quality: 1,
+      transcription: 1,
+      language: 1,
+      created_at: 1,
+      caller_number: '$call.caller_number',
+      agent_number: '$call.agent_number',
+      duration: '$call.duration',
+      call_recording: '$call.call_recording',
+      call_start_time: '$call.call_start_time',
+    },
+  });
+
+  return stages;
+}
+
+function analysisToCsvRecord(doc) {
+  return {
+    'Call ID':         doc.call_id || '',
+    'Call Category':   doc.call_category || '',
+    'Sub-Category':    doc.ai_insight || '',
+    'Gemini Category': doc.category || '',
+    'Gemini Sub-Cat':  doc.sub_category || '',
+    'Summary':         (doc.summary || '').replace(/\n/g, '\r\n'),
+    'Bug Category':    doc.bug_category || '',
+    'Bug Description': doc.bugs || '',
+    'Call Resolved':   doc.call_resolved || '',
+    'Agent Score':     doc.agent_score ?? '',
+    'Audio Rating':    doc.audio_quality?.rating || '',
+    'Audio Issues':    doc.audio_quality?.issues || '',
+    'Language':        Array.isArray(doc.language) ? doc.language.join(', ') : (doc.language || ''),
+    'Caller':          doc.caller_number || '',
+    'Agent Number':    doc.agent_number || '',
+    'Duration (s)':    doc.duration ?? '',
+    'Recording':       doc.call_recording || '',
+    'Date':            formatDate(doc.call_start_time || doc.created_at),
+    'Transcription':   (doc.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim(),
+  };
+}
+
+function buildAnalysisFileName(filters = {}) {
+  const from = toDayToken(filters.dateFrom) || 'all';
+  const to = toDayToken(filters.dateTo) || 'today';
+  const parts = ['ai-analysis', `${from}-to-${to}`];
+  const cat = slugPart(filters.callCategory || filters.category, 20);
+  if (cat) parts.push(cat);
+  return `${parts.join('-')}.csv`;
+}
+
+// ─── Export type registry ────────────────────────────────────────────────────
+
+const EXPORT_TYPES = {
+  calls: {
+    collection: 'calls',
+    headers: [
+      'Call ID', 'Caller Number', 'Called Number', 'Agent Name', 'Agent Number', 'Status',
+      'Call Start Time', 'Answer Time', 'Call End Time', 'Duration (s)', 'Agent Duration (s)',
+      'Call Category', 'Sub-Category', 'Summary', 'Bug Category', 'Bug Description',
+      'Call Resolved', 'Agent Score', 'Audio Rating', 'Language', 'Recording URL',
+      'Transcription', 'Created At',
+    ],
+    buildFilter: buildExportFilter,
+    buildPipeline: buildCallsPipeline,
+    toRecord: callsToCsvRecord,
+    buildFileName: buildReadableFileName,
+  },
+  analysis: {
+    collection: 'call_analysis',
+    headers: [
+      'Call ID', 'Call Category', 'Sub-Category', 'Gemini Category', 'Gemini Sub-Cat',
+      'Summary', 'Bug Category', 'Bug Description', 'Call Resolved', 'Agent Score',
+      'Audio Rating', 'Audio Issues', 'Language', 'Caller', 'Agent Number',
+      'Duration (s)', 'Recording', 'Date', 'Transcription',
+    ],
+    buildFilter: buildAnalysisFilter,
+    buildPipeline: (filter, user) => buildAnalysisPipeline(filter, user),
+    toRecord: analysisToCsvRecord,
+    buildFileName: buildAnalysisFileName,
+  },
+};
+
+async function streamCsv({ db, type = 'calls', filters, user, writable, onProgress }) {
+  const def = EXPORT_TYPES[type];
+  if (!def) throw new Error(`Unknown export type: ${type}`);
+
+  await writeLine(writable, def.headers.map(csvEscape).join(',') + '\r\n');
+
+  const filter = def.buildFilter(filters, user);
+  const pipeline = def.buildPipeline(filter, user);
+  const cursor = db.collection(def.collection).aggregate(pipeline, {
     allowDiskUse: true,
     batchSize: 300,
   });
 
   let count = 0;
   for await (const doc of cursor) {
-    const row = toCsvRecord(doc);
-    const line = headers.map(h => csvEscape(row[h])).join(',') + '\r\n';
+    const row = def.toRecord(doc);
+    const line = def.headers.map(h => csvEscape(row[h])).join(',') + '\r\n';
     await writeLine(writable, line);
     count += 1;
     if (onProgress && count % 1000 === 0) await onProgress(count);
@@ -259,11 +405,13 @@ function sanitizeUser(user) {
   };
 }
 
-async function createExportJob({ filters, user }) {
+async function createExportJob({ filters, user, type = 'calls' }) {
+  if (!EXPORT_TYPES[type]) throw new Error(`Unknown export type: ${type}`);
   const db = await getDb();
   const now = new Date();
   const doc = {
     status: 'pending',
+    export_type: type,
     filters: normalizeFilters(filters),
     requested_by: sanitizeUser(user),
     rows_processed: 0,
@@ -277,7 +425,7 @@ async function createExportJob({ filters, user }) {
     finished_at: null,
   };
   const result = await db.collection(JOBS_COLLECTION).insertOne(doc);
-  logger.info('[ExportWorker] Job queued', { job_id: result.insertedId.toString(), user: doc.requested_by });
+  logger.info('[ExportWorker] Job queued', { job_id: result.insertedId.toString(), type, user: doc.requested_by });
   return result.insertedId.toString();
 }
 
@@ -340,14 +488,18 @@ async function processOneJob() {
 
   isRunning = true;
   const jobId = job._id.toString();
+  const exportType = job.export_type || 'calls';
+  const typeDef = EXPORT_TYPES[exportType];
   const exportDir = getExportDir();
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const diskFileName = `call-report-${stamp}-${jobId}.csv`;
-  const downloadFileName = buildReadableFileName(job.filters || {});
+  const diskFileName = `${exportType}-${stamp}-${jobId}.csv`;
+  const downloadFileName = typeDef
+    ? typeDef.buildFileName(job.filters || {})
+    : `${exportType}-${stamp}.csv`;
   const filePath = path.join(exportDir, diskFileName);
   let stream;
 
-  logger.info('[ExportWorker] Processing job', { job_id: jobId });
+  logger.info('[ExportWorker] Processing job', { job_id: jobId, type: exportType });
 
   try {
     await fsp.mkdir(exportDir, { recursive: true });
@@ -356,6 +508,7 @@ async function processOneJob() {
 
     const rowCount = await streamCsv({
       db,
+      type: exportType,
       filters: job.filters || {},
       user: job.requested_by || {},
       writable: stream,
@@ -417,4 +570,5 @@ module.exports = {
   createExportJob,
   getExportJob,
   streamCsv,
+  EXPORT_TYPES,
 };

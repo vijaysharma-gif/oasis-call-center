@@ -1,70 +1,118 @@
 /**
- * Analysis Worker — background job that processes call recordings.
+ * Analysis Worker — background job that processes call recordings concurrently.
  *
- * Polls every POLL_INTERVAL_MS for calls that have a recording URL
- * but no completed analysis yet. Processes one at a time and writes
- * results to the `call_analysis` collection.
+ * Each tick (every POLL_INTERVAL_MS) claims up to MAX_CONCURRENCY pending calls
+ * and processes them in parallel. Gemini I/O is mostly network-bound, so
+ * concurrency dramatically improves throughput.
+ *
+ * Tunable via env: ANALYSIS_CONCURRENCY (default 4)
+ *                  ANALYSIS_POLL_SEC   (default 5)
  */
 const { getDb }               = require('../db');
 const { categorizeRecording } = require('../services/geminiService');
 const logger                  = require('../logger');
 
+const MAX_CONCURRENCY  = Math.max(1, Number(process.env.ANALYSIS_CONCURRENCY || 4));
+const POLL_INTERVAL_MS = Math.max(1000, Number(process.env.ANALYSIS_POLL_SEC || 5) * 1000);
+const STALE_LOCK_MIN   = 15;
+const MAX_ATTEMPTS     = 5;  // total attempts including first
 
-const POLL_INTERVAL_MS = 10_000;  // check every 10 seconds
-const STALE_LOCK_MIN   = 15;      // re-queue if stuck in "processing" > 15 min
+// Exponential backoff between retries for transient Gemini failures.
+// Schedule: 30s → 2m → 8m → 30m → give up (all capped at 30m).
+function backoffSeconds(attemptNumber) {
+  const base = 30;
+  const max = 30 * 60;
+  return Math.min(base * Math.pow(4, attemptNumber - 1), max);
+}
 
-let isRunning = false;
+// Concurrency state — all reads/writes happen on the single Node event loop
+// so we don't need atomic primitives, but we MUST serialize the tick function
+// to prevent two ticks racing on `inFlight` across awaits.
+let inFlight = 0;
+let tickRunning = false;  // true while a tick is actively claiming/spawning
+let tickQueued = false;   // another tick wants to run after the current one finishes
 
-// ─── One processing tick ──────────────────────────────────────────────────────
-
-async function processTick() {
-  if (isRunning) return;
-
-  let db;
-  try {
-    db = await getDb();
-  } catch (err) {
-    logger.error('[Worker] DB connection error', { message: err.message });
-    return;
-  }
-
-  const analysisCol = db.collection('call_analysis');
-  const callsCol    = db.collection('calls');
-
-  // ── 1. Reset stale "processing" records ──────────────────────────────────
+// ─── Stale lock reset ────────────────────────────────────────────────────────
+async function resetStaleLocks(db) {
   const staleThreshold = new Date(Date.now() - STALE_LOCK_MIN * 60 * 1000);
-  await analysisCol.updateMany(
+  const result = await db.collection('call_analysis').updateMany(
     { status: 'processing', updated_at: { $lt: staleThreshold } },
     { $set: { status: 'pending', error: 'Stale lock reset', updated_at: new Date() } }
   );
+  if (result.modifiedCount > 0) {
+    logger.warn('[Worker] Reset stale locks', { count: result.modifiedCount });
+  }
+}
 
-  // ── 2. Find a pending call_analysis record ────────────────────────────────
-  const record = await analysisCol.findOneAndUpdate(
-    { status: 'pending' },
-    { $set: { status: 'processing', updated_at: new Date() } },
+// ─── Atomically claim one pending record ─────────────────────────────────────
+// MongoDB guarantees findOneAndUpdate is atomic per document, so even across
+// multiple workers/containers the same record can never be claimed twice.
+// We also record `processing_id` so we can detect stolen locks on writeback.
+async function claimNext(db) {
+  const now = new Date();
+  const processingId = now.getTime().toString(36) + Math.random().toString(36).slice(2, 8);
+  // Only pick records that are due (no scheduled retry, or retry time has passed)
+  const result = await db.collection('call_analysis').findOneAndUpdate(
+    {
+      status: 'pending',
+      $or: [
+        { next_attempt_at: { $exists: false } },
+        { next_attempt_at: null },
+        { next_attempt_at: { $lte: now } },
+      ],
+    },
+    { $set: { status: 'processing', processing_id: processingId, updated_at: now } },
     { sort: { created_at: 1 }, returnDocument: 'after' }
   );
+  return result;
+}
 
-  if (!record) return;
+// Periodic heartbeat so long-running Gemini calls aren't wrongly reset as stale
+function startHeartbeat(db, call_id, processing_id) {
+  return setInterval(async () => {
+    try {
+      await db.collection('call_analysis').updateOne(
+        { call_id, processing_id, status: 'processing' },
+        { $set: { updated_at: new Date() } }
+      );
+    } catch { /* best-effort */ }
+  }, 60_000);  // every minute
+}
 
-  isRunning = true;
-  const { call_id, recording_url } = record;
-  logger.info('[Worker] Processing', { call_id });
+// ─── Process a single record (runs inside its own promise) ───────────────────
+async function processRecord(db, record) {
+  const analysisCol = db.collection('call_analysis');
+  const callsCol    = db.collection('calls');
+  const { call_id, recording_url, processing_id } = record;
+
+  // Writebacks only succeed if we still own this record (i.e. the lock wasn't
+  // reset and reclaimed by another worker). Prevents two workers overwriting
+  // each other if the stale-lock reset ever fires on a still-running job.
+  const ownedFilter = { call_id, processing_id };
+
+  logger.info('[Worker] Processing', { call_id, inFlight });
+
+  const heartbeat = startHeartbeat(db, call_id, processing_id);
 
   try {
+    // Skip very short calls
     const callDoc = await callsCol.findOne({ call_id });
     if (callDoc && callDoc.duration > 0 && callDoc.duration < 10) {
-      await analysisCol.updateOne(
-        { call_id },
+      const wb = await analysisCol.updateOne(
+        ownedFilter,
         { $set: { status: 'completed', category: 'Call too Short', sub_category: '', call_category: 'Call too Short', summary: '', transcription: '', language: '', error: null, processed_at: new Date(), updated_at: new Date() } }
       );
+      if (wb.matchedCount === 0) {
+        logger.warn('[Worker] Lock lost, skipping writeback', { call_id });
+        return;
+      }
       await callsCol.updateOne({ call_id }, { $set: { category: 'Call too Short', sub_category: '' } });
       logger.info('[Worker] Skipped (too short)', { call_id, duration: callDoc.duration });
-      isRunning = false;
       return;
     }
 
-    // Fetch existing categories to pass to Gemini in a single call
+    // Fetch existing categories — each job fetches its own snapshot so concurrent
+    // jobs see the latest dynamically-created categories.
     const [callCatDocs, bugCatDocs] = await Promise.all([
       db.collection('call_categories').find({}).toArray(),
       db.collection('bug_categories').find({}).toArray(),
@@ -75,22 +123,27 @@ async function processTick() {
     const result = await categorizeRecording(recording_url, { callCategories, bugCategories });
 
     if (result.success && result.category === 'Audio Unclear') {
-      await analysisCol.updateOne(
-        { call_id },
+      const wb = await analysisCol.updateOne(
+        ownedFilter,
         { $set: { status: 'completed', category: 'Audio Unclear', sub_category: '', call_category: 'Audio Unclear', summary: result.summary || '', ai_insight: '-', bugs: '-', agent_score: null, call_resolved: 'No', audio_quality: result.audio_quality, transcription: result.transcription || '', language: result.language || [], error: null, processed_at: new Date(), updated_at: new Date() } }
       );
+      if (wb.matchedCount === 0) {
+        logger.warn('[Worker] Lock lost, skipping writeback', { call_id });
+        return;
+      }
       await callsCol.updateOne({ call_id }, { $set: { category: 'Audio Unclear', sub_category: '' } });
       logger.info('[Worker] Audio Unclear', { call_id });
     } else if (result.permanent) {
-      await analysisCol.updateOne(
-        { call_id },
+      const wb = await analysisCol.updateOne(
+        ownedFilter,
         { $set: { status: 'failed', error: result.error, updated_at: new Date() }, $inc: { attempts: 1 } }
       );
+      if (wb.matchedCount === 0) { logger.warn('[Worker] Lock lost', { call_id }); return; }
       await callsCol.updateOne({ call_id }, { $set: { call_recording: '' } });
       logger.warn('[Worker] Permanent failure — not retrying', { call_id, error: result.error });
     } else if (result.success) {
-      await analysisCol.updateOne(
-        { call_id },
+      const wb = await analysisCol.updateOne(
+        ownedFilter,
         {
           $set: {
             status:        'completed',
@@ -107,44 +160,152 @@ async function processTick() {
             transcription: result.transcription,
             language:      result.language,
             error:         null,
+            last_error:    null,
+            next_attempt_at: null,
+            processing_id: null,
             processed_at:  new Date(),
             updated_at:    new Date(),
           },
         }
       );
+      if (wb.matchedCount === 0) {
+        logger.warn('[Worker] Lock lost, skipping writeback', { call_id });
+        return;
+      }
       await callsCol.updateOne(
         { call_id },
         { $set: { category: result.category, sub_category: result.sub_category } }
       );
       logger.info('[Worker] Done', { call_id });
     } else {
-      await analysisCol.updateOne(
-        { call_id },
-        { $set: { status: 'failed', error: result.error, updated_at: new Date() }, $inc: { attempts: 1 } }
-      );
-      logger.warn('[Worker] Failed', { call_id, error: result.error });
-
-      const updated = await analysisCol.findOne({ call_id });
-      if ((updated?.attempts || 0) < 3) {
-        await analysisCol.updateOne(
-          { call_id },
-          { $set: { status: 'pending', updated_at: new Date() } }
-        );
-      }
+      // Transient failure — schedule a retry with exponential backoff
+      await scheduleRetryOrFail(analysisCol, record, ownedFilter, result.error);
     }
   } catch (err) {
     logger.error('[Worker] Unexpected error', { call_id, message: err.message, stack: err.stack });
-    await analysisCol.updateOne(
-      { call_id },
-      { $set: { status: 'failed', error: err.message, updated_at: new Date() } }
-    );
+    // Treat unexpected errors as transient — will retry until MAX_ATTEMPTS
+    await scheduleRetryOrFail(analysisCol, record, ownedFilter, err.message || 'Unexpected error');
   } finally {
-    isRunning = false;
+    clearInterval(heartbeat);
   }
 }
 
-// ─── Enqueue a new recording (called by webhook) ──────────────────────────────
+// ─── Retry scheduling ────────────────────────────────────────────────────────
+async function scheduleRetryOrFail(analysisCol, record, ownedFilter, errMessage) {
+  const { call_id } = record;
+  const newAttempts = (record.attempts || 0) + 1;
 
+  if (newAttempts < MAX_ATTEMPTS) {
+    const backoffSec = backoffSeconds(newAttempts);
+    const nextAt = new Date(Date.now() + backoffSec * 1000);
+    const wb = await analysisCol.updateOne(
+      ownedFilter,
+      {
+        $set: {
+          status: 'pending',              // put back in queue (not 'failed')
+          processing_id: null,
+          next_attempt_at: nextAt,
+          last_error: errMessage,
+          updated_at: new Date(),
+        },
+        $inc: { attempts: 1 },
+      }
+    );
+    if (wb.matchedCount === 0) {
+      logger.warn('[Worker] Lock lost during retry schedule', { call_id });
+      return;
+    }
+    logger.warn('[Worker] Scheduled retry', {
+      call_id,
+      attempt: newAttempts,
+      maxAttempts: MAX_ATTEMPTS,
+      backoffSec,
+      error: errMessage,
+    });
+  } else {
+    // Exhausted — mark permanently failed
+    const wb = await analysisCol.updateOne(
+      ownedFilter,
+      {
+        $set: {
+          status: 'failed',
+          error: errMessage,
+          updated_at: new Date(),
+        },
+        $inc: { attempts: 1 },
+      }
+    );
+    if (wb.matchedCount === 0) {
+      logger.warn('[Worker] Lock lost during final fail', { call_id });
+      return;
+    }
+    logger.error('[Worker] Max retries exceeded — giving up', {
+      call_id,
+      attempts: newAttempts,
+      error: errMessage,
+    });
+  }
+}
+
+// ─── Tick: fill the worker pool up to MAX_CONCURRENCY ────────────────────────
+// Serialized via tickRunning — two ticks can never execute the claim/spawn
+// loop simultaneously, which prevents over-spawning past MAX_CONCURRENCY.
+async function processTick() {
+  if (tickRunning) {
+    // Another tick is already spawning work; record that we want another pass
+    // after it finishes so new pending records aren't left idle.
+    tickQueued = true;
+    return;
+  }
+  tickRunning = true;
+
+  try {
+    let db;
+    try {
+      db = await getDb();
+    } catch (err) {
+      logger.error('[Worker] DB connection error', { message: err.message });
+      return;
+    }
+
+    // Reset stale locks only when we have headroom to start new work
+    if (inFlight < MAX_CONCURRENCY) {
+      await resetStaleLocks(db);
+    }
+
+    // Claim and spawn jobs until the pool is full (or no more pending records)
+    while (inFlight < MAX_CONCURRENCY) {
+      const record = await claimNext(db);
+      if (!record) break;
+
+      inFlight += 1;
+
+      // Fire-and-forget — each record runs independently. On completion, the
+      // .finally() triggers another tick so the pool refills immediately.
+      processRecord(db, record)
+        .catch(err => logger.error('[Worker] Unhandled job error', { message: err.message }))
+        .finally(() => {
+          inFlight -= 1;
+          // Schedule another tick on the next macrotask so we don't recurse.
+          // processTick's own guard collapses multiple pending requests.
+          setImmediate(() => {
+            processTick().catch(err => logger.error('[Worker] Tick error', { message: err.message }));
+          });
+        });
+    }
+  } finally {
+    tickRunning = false;
+    // If any ticks arrived while we were running, run exactly one more to catch up.
+    if (tickQueued) {
+      tickQueued = false;
+      setImmediate(() => {
+        processTick().catch(err => logger.error('[Worker] Queued tick error', { message: err.message }));
+      });
+    }
+  }
+}
+
+// ─── Enqueue a new recording (called by webhook) ─────────────────────────────
 async function enqueueRecording(call_id, recording_url) {
   const db  = await getDb();
   const col = db.collection('call_analysis');
@@ -161,12 +322,21 @@ async function enqueueRecording(call_id, recording_url) {
     { upsert: true }
   );
   logger.info('[Worker] Enqueued', { call_id });
+
+  // Kick the worker immediately so new calls don't wait for the next tick
+  if (inFlight < MAX_CONCURRENCY) {
+    setImmediate(() => processTick().catch(err =>
+      logger.error('[Worker] Immediate tick failed', { message: err.message })
+    ));
+  }
 }
 
 // ─── Start the background polling loop ───────────────────────────────────────
-
 function startWorker() {
-  logger.info(`[Worker] Started`, { pollIntervalSec: POLL_INTERVAL_MS / 1000 });
+  logger.info('[Worker] Started', {
+    concurrency: MAX_CONCURRENCY,
+    pollIntervalSec: POLL_INTERVAL_MS / 1000,
+  });
   processTick();
   setInterval(processTick, POLL_INTERVAL_MS);
 }

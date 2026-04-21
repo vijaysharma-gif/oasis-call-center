@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs/promises');
 const path = require('path');
+const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../db');
 const { requireAuth } = require('../middleware/auth');
@@ -9,7 +10,40 @@ const logger = require('../logger');
 
 const router = express.Router();
 
-// All calls routes require authentication
+// Token-based download (no Bearer header needed — works with window.open / <a download>)
+// Mounted BEFORE requireAuth so it can validate its own short-lived token.
+router.get('/export/jobs/:id/download', async (req, res, next) => {
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
+  if (!queryToken) return next(); // fall through to Bearer-auth route below
+
+  let payload;
+  try {
+    payload = jwt.verify(queryToken, process.env.JWT_SECRET);
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired download token' });
+  }
+  if (payload.job_id !== req.params.id || payload.type !== 'export-download') {
+    return res.status(403).json({ error: 'Token does not match job' });
+  }
+
+  const job = await getExportJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Export job not found' });
+  if (job.status !== 'completed') return res.status(409).json({ error: 'Export is not ready yet' });
+  if (!job.file_path) return res.status(404).json({ error: 'Export file missing' });
+
+  const baseDir = path.resolve(process.env.LOG_DIR || path.join(__dirname, '../../logs'), 'exports');
+  const filePath = path.resolve(job.file_path);
+  if (!filePath.startsWith(baseDir)) return res.status(400).json({ error: 'Invalid export path' });
+
+  try { await fs.access(filePath); }
+  catch { return res.status(404).json({ error: 'Export file not found on disk' }); }
+
+  res.download(filePath, job.file_name || path.basename(filePath), (err) => {
+    if (err && !res.headersSent) res.status(500).json({ error: 'Failed to download export' });
+  });
+});
+
+// All other routes require Bearer authentication
 router.use(requireAuth);
 
 function pickExportFilters(src = {}) {
@@ -159,6 +193,18 @@ router.get('/export/jobs/:id', async (req, res) => {
   if (!job) return res.status(404).json({ error: 'Export job not found' });
   if (!canAccessJob(job, req.user)) return res.status(403).json({ error: 'Access denied' });
 
+  let downloadUrl = null;
+  if (job.status === 'completed') {
+    // Short-lived token so the browser can download directly via window.open() / <a download>
+    // (no Authorization header available for those flows).
+    const token = jwt.sign(
+      { job_id: job._id.toString(), type: 'export-download' },
+      process.env.JWT_SECRET,
+      { expiresIn: '10m' }
+    );
+    downloadUrl = `/api/calls/export/jobs/${job._id.toString()}/download?token=${token}`;
+  }
+
   res.json({
     job_id: job._id.toString(),
     status: job.status,
@@ -169,7 +215,7 @@ router.get('/export/jobs/:id', async (req, res) => {
     created_at: job.created_at,
     started_at: job.started_at || null,
     finished_at: job.finished_at || null,
-    download_url: job.status === 'completed' ? '/api/calls/export/jobs/' + job._id.toString() + '/download' : null,
+    download_url: downloadUrl,
   });
 });
 

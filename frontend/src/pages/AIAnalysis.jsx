@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef, forwardRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useDateRange, useAgentMap } from '../hooks/useCalls';
+import { useExportJob } from '../hooks/useExportJob';
 import TranscriptionModal from '../components/TranscriptionModal';
 import AudioPlayer from '../components/AudioPlayer';
-import ExcelJS from 'exceljs';
 import Pagination from '../components/Pagination';
+import ExportButton from '../components/ExportButton';
 
 const API = import.meta.env.VITE_API_URL ?? '';
 
@@ -53,7 +54,6 @@ export default function AIAnalysis() {
   const [dateFrom,    setDateFrom]    = useState('');
   const [dateTo,      setDateTo]      = useState('');
   const [selected,    setSelected]    = useState(null);
-  const [exporting,   setExporting]   = useState(false);
   const [sortBy,      setSortBy]      = useState('created_at');
   const [sortDir,     setSortDir]     = useState('desc');
   const [bugsOnly,    setBugsOnly]    = useState(false);
@@ -153,81 +153,22 @@ export default function AIAnalysis() {
   function clearFilters() { setSearch(''); setCategory(''); setDateFrom(''); setDateTo(''); setBugsOnly(false); setBugCategory(''); setCallCategory(''); setPage(1); }
   const isFiltered = !!(search || category || dateFrom || dateTo || bugsOnly || bugCategory || callCategory);
 
-  async function handleExport() {
-    setExporting(true);
-    try {
-      const params = new URLSearchParams({ limit: 9999, offset: 0 });
-      if (search)        params.append('search',   search);
-      if (category)      params.append('category', category);
-      if (effectiveFrom) params.append('dateFrom', `${effectiveFrom}T00:00`);
-      if (effectiveTo)   params.append('dateTo',   `${effectiveTo}T23:59`);
+  const { runExport, exporting, label: exportLabel } = useExportJob({
+    jobsEndpoint: '/api/analysis/export/jobs',
+    token,
+    fallbackName: `ai-analysis-${new Date().toISOString().slice(0,10)}.csv`,
+  });
 
-      const res  = await fetch(`${API}/api/analysis?${params}`, { headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json();
-
-      const wrapCols = new Set(['Summary', 'Bug Description', 'Transcription']);
-      const wideCols = new Set(['Call ID', 'Recording']);
-      const headers = ['Call ID','Call Category','Sub-Category','Gemini Category','Gemini Sub-Cat','Summary','Bug Category','Bug Description','Call Resolved','Agent Score','Audio Rating','Audio Issues','Language','Caller','Agent Number','Duration (s)','Recording','Date','Transcription'];
-
-      const wb = new ExcelJS.Workbook();
-      const ws = wb.addWorksheet('AI Analysis');
-
-      // Header row
-      ws.columns = headers.map(h => ({
-        header: h, key: h,
-        width: wrapCols.has(h) ? 60 : wideCols.has(h) ? 30 : 18,
-      }));
-      ws.getRow(1).font = { bold: true };
-
-      // Data rows
-      for (const a of (data.analyses ?? [])) {
-        const transcription = (a.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim();
-        ws.addRow({
-          'Call ID':         a.call_id,
-          'Call Category':   a.call_category || '',
-          'Sub-Category':    a.ai_insight || '',
-          'Gemini Category': a.category || '',
-          'Gemini Sub-Cat':  a.sub_category || '',
-          'Summary':         a.summary || '',
-          'Bug Category':    a.bug_category || '',
-          'Bug Description': a.bugs || '',
-          'Call Resolved':   a.call_resolved || '',
-          'Agent Score':     a.agent_score ?? '',
-          'Audio Rating':    a.audio_quality?.rating || '',
-          'Audio Issues':    a.audio_quality?.issues || '',
-          'Language':        Array.isArray(a.language) ? a.language.join(', ') : (a.language || ''),
-          'Caller':          a.call?.caller_number || '',
-          'Agent Number':    a.call?.agent_number || '',
-          'Duration (s)':    a.call?.duration ?? '',
-          'Recording':       a.call?.call_recording || '',
-          'Date':            a.call?.created_at ? new Date(a.call.created_at).toLocaleString('en-IN') : '',
-          'Transcription':   transcription,
-        });
-      }
-
-      // Apply wrap text to long columns
-      ws.eachRow((row, rowNum) => {
-        if (rowNum === 1) return;
-        row.eachCell((cell, colNum) => {
-          if (wrapCols.has(headers[colNum - 1])) {
-            cell.alignment = { wrapText: true, vertical: 'top' };
-          }
-        });
-      });
-
-      const buf = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `ai_analysis_${new Date().toISOString().slice(0,10)}.xlsx`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error('Export failed', e);
-    } finally {
-      setExporting(false);
-    }
+  function handleExport() {
+    const payload = {};
+    if (search) payload.search = search;
+    if (category) payload.category = category;
+    if (callCategory) payload.callCategory = callCategory;
+    if (bugCategory) payload.bugCategory = bugCategory;
+    if (bugsOnly) payload.bugsOnly = '1';
+    if (effectiveFrom) payload.dateFrom = `${effectiveFrom}T00:00`;
+    if (effectiveTo) payload.dateTo = `${effectiveTo}T23:59`;
+    runExport(payload);
   }
 
   return (
@@ -347,16 +288,7 @@ export default function AIAnalysis() {
         {isDateFiltered && (
           <span className="text-xs text-indigo-600 dark:text-indigo-400 font-medium">Filtered</span>
         )}
-        <button
-          onClick={handleExport}
-          disabled={exporting}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-xs font-medium transition-colors disabled:opacity-50 shrink-0 ml-auto"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M8 2v8M5 7l3 3 3-3M2 12v1a1 1 0 001 1h10a1 1 0 001-1v-1"/>
-          </svg>
-          {exporting ? 'Exporting…' : 'Export XLSX'}
-        </button>
+        <ExportButton onClick={handleExport} exporting={exporting} label={exportLabel} className="ml-auto">Export CSV</ExportButton>
       </div>
 
       {/* Content */}
