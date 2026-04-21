@@ -1,0 +1,420 @@
+const fs = require('fs');
+const fsp = require('fs/promises');
+const path = require('path');
+const { once } = require('events');
+const { ObjectId } = require('mongodb');
+const { getDb } = require('../db');
+const logger = require('../logger');
+
+const JOBS_COLLECTION = 'call_export_jobs';
+const POLL_INTERVAL_MS = 2000;
+const STALE_MINUTES = 30;
+const RETENTION_HOURS = 48;
+
+let isRunning = false;
+
+function getExportDir() {
+  return path.join(process.env.LOG_DIR || path.join(__dirname, '../../logs'), 'exports');
+}
+
+function toDayToken(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+}
+
+function slugPart(value, maxLen = 28) {
+  if (!value) return '';
+  const raw = String(value).trim().toLowerCase();
+  if (!raw) return '';
+  const cleaned = raw
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, maxLen);
+  return cleaned;
+}
+
+function buildReadableFileName(filters = {}) {
+  const from = toDayToken(filters.dateFrom) || 'all';
+  const to = toDayToken(filters.dateTo) || 'today';
+  const parts = ['call-report', `${from}-to-${to}`];
+
+  const status = slugPart(filters.status, 16);
+  if (status) parts.push(status);
+
+  const agent = slugPart(filters.agentNumber, 20);
+  if (agent) parts.push(`agent-${agent}`);
+
+  return `${parts.join('-')}.csv`;
+}
+
+function formatDate(v) {
+  return v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+}
+
+function normalizeFilters(raw = {}) {
+  const pick = k => typeof raw[k] === 'string' ? raw[k].trim() : '';
+  return {
+    search: pick('search'),
+    status: pick('status'),
+    dateFrom: pick('dateFrom'),
+    dateTo: pick('dateTo'),
+    agentNumber: pick('agentNumber'),
+  };
+}
+
+function buildExportFilter(filters, user) {
+  const { search, status, dateFrom, dateTo, agentNumber } = normalizeFilters(filters);
+  const conditions = [];
+
+  if (user.role === 'agent') {
+    conditions.push({
+      $or: [
+        { agent_number: user.agent_number },
+        { caller_number: user.agent_number },
+        { called_number: user.agent_number },
+        { agent_answer_time: { $exists: false } },
+        { agent_answer_time: '' },
+      ],
+    });
+  }
+
+  if (search) {
+    conditions.push({
+      $or: [
+        { caller_number: { $regex: search, $options: 'i' } },
+        { called_number: { $regex: search, $options: 'i' } },
+        { agent_name: { $regex: search, $options: 'i' } },
+        { agent_number: { $regex: search, $options: 'i' } },
+      ],
+    });
+  }
+
+  if (status === 'received') {
+    conditions.push({ agent_answer_time: { $exists: true, $ne: '' } });
+  } else if (status === 'missed') {
+    conditions.push({ $or: [{ agent_answer_time: { $exists: false } }, { agent_answer_time: '' }] });
+  }
+
+  if (dateFrom || dateTo) {
+    const dc = {};
+    if (dateFrom) dc.$gte = new Date(dateFrom);
+    if (dateTo) dc.$lte = new Date(dateTo);
+    conditions.push({ created_at: dc });
+  }
+
+  if (agentNumber && user.role === 'admin') {
+    conditions.push({ agent_number: agentNumber });
+  }
+
+  return conditions.length > 0 ? { $and: conditions } : {};
+}
+
+function csvEscape(value) {
+  const s = value == null ? '' : String(value);
+  if (!/[",\r\n]/.test(s)) return s;
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+async function writeLine(writable, line) {
+  if (writable.write(line)) return;
+  await Promise.race([
+    once(writable, 'drain'),
+    once(writable, 'error').then(([err]) => { throw err; }),
+  ]);
+}
+
+function buildPipeline(filter) {
+  return [
+    { $match: filter },
+    { $sort: { created_at: -1 } },
+    {
+      $lookup: {
+        from: 'agents',
+        localField: 'agent_number',
+        foreignField: 'agent_number',
+        as: 'agent_doc',
+      },
+    },
+    {
+      $lookup: {
+        from: 'call_analysis',
+        let: { cid: '$call_id' },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$call_id', '$$cid'] },
+                  { $eq: ['$status', 'completed'] },
+                ],
+              },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              call_category: 1,
+              ai_insight: 1,
+              summary: 1,
+              bug_category: 1,
+              bugs: 1,
+              call_resolved: 1,
+              agent_score: 1,
+              audio_quality: 1,
+              language: 1,
+              transcription: 1,
+            },
+          },
+        ],
+        as: 'analysis_doc',
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        call_id: 1,
+        caller_number: 1,
+        called_number: 1,
+        agent_name: 1,
+        agent_number: 1,
+        agent_answer_time: 1,
+        call_start_time: 1,
+        call_end_time: 1,
+        duration: 1,
+        agent_duration: 1,
+        call_recording: 1,
+        created_at: 1,
+        analysis: { $first: '$analysis_doc' },
+        enriched_agent_name: { $first: '$agent_doc.name' },
+      },
+    },
+  ];
+}
+
+function toCsvRecord(doc) {
+  const a = doc.analysis || {};
+  return {
+    'Call ID': doc.call_id || '',
+    'Caller Number': doc.caller_number || '',
+    'Called Number': doc.called_number || '',
+    'Agent Name': doc.enriched_agent_name || doc.agent_name || '',
+    'Agent Number': doc.agent_number || '',
+    'Status': doc.agent_answer_time ? 'Received' : 'Missed',
+    'Call Start Time': formatDate(doc.call_start_time),
+    'Answer Time': formatDate(doc.agent_answer_time),
+    'Call End Time': formatDate(doc.call_end_time),
+    'Duration (s)': doc.duration || 0,
+    'Agent Duration (s)': doc.agent_duration || 0,
+    'Call Category': a.call_category || '',
+    'Sub-Category': a.ai_insight || '',
+    'Summary': (a.summary || '').replace(/\n/g, '\r\n'),
+    'Bug Category': a.bug_category || '',
+    'Bug Description': a.bugs || '',
+    'Call Resolved': a.call_resolved || '',
+    'Agent Score': a.agent_score ?? '',
+    'Audio Rating': a.audio_quality?.rating || '',
+    'Language': Array.isArray(a.language) ? a.language.join(', ') : (a.language || ''),
+    'Recording URL': doc.call_recording || '',
+    'Transcription': (a.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim(),
+    'Created At': formatDate(doc.created_at),
+  };
+}
+
+async function streamCsv({ db, filters, user, writable, onProgress }) {
+  const headers = [
+    'Call ID', 'Caller Number', 'Called Number', 'Agent Name', 'Agent Number', 'Status',
+    'Call Start Time', 'Answer Time', 'Call End Time', 'Duration (s)', 'Agent Duration (s)',
+    'Call Category', 'Sub-Category', 'Summary', 'Bug Category', 'Bug Description',
+    'Call Resolved', 'Agent Score', 'Audio Rating', 'Language', 'Recording URL',
+    'Transcription', 'Created At',
+  ];
+
+  await writeLine(writable, headers.map(csvEscape).join(',') + '\r\n');
+
+  const filter = buildExportFilter(filters, user);
+  const cursor = db.collection('calls').aggregate(buildPipeline(filter), {
+    allowDiskUse: true,
+    batchSize: 300,
+  });
+
+  let count = 0;
+  for await (const doc of cursor) {
+    const row = toCsvRecord(doc);
+    const line = headers.map(h => csvEscape(row[h])).join(',') + '\r\n';
+    await writeLine(writable, line);
+    count += 1;
+    if (onProgress && count % 1000 === 0) await onProgress(count);
+  }
+
+  return count;
+}
+
+function sanitizeUser(user) {
+  return {
+    role: user?.role || 'agent',
+    name: user?.name || '',
+    agent_number: user?.agent_number || '',
+  };
+}
+
+async function createExportJob({ filters, user }) {
+  const db = await getDb();
+  const now = new Date();
+  const doc = {
+    status: 'pending',
+    filters: normalizeFilters(filters),
+    requested_by: sanitizeUser(user),
+    rows_processed: 0,
+    file_name: null,
+    file_path: null,
+    file_size: null,
+    error: null,
+    created_at: now,
+    updated_at: now,
+    started_at: null,
+    finished_at: null,
+  };
+  const result = await db.collection(JOBS_COLLECTION).insertOne(doc);
+  logger.info('[ExportWorker] Job queued', { job_id: result.insertedId.toString(), user: doc.requested_by });
+  return result.insertedId.toString();
+}
+
+async function getExportJob(jobId) {
+  if (!ObjectId.isValid(jobId)) return null;
+  const db = await getDb();
+  return db.collection(JOBS_COLLECTION).findOne({ _id: new ObjectId(jobId) });
+}
+
+async function resetStaleJobs(db) {
+  const threshold = new Date(Date.now() - STALE_MINUTES * 60 * 1000);
+  const result = await db.collection(JOBS_COLLECTION).updateMany(
+    { status: 'processing', updated_at: { $lt: threshold } },
+    { $set: { status: 'failed', error: 'Job timed out and was reset', finished_at: new Date(), updated_at: new Date() } }
+  );
+  if (result.modifiedCount > 0) {
+    logger.warn('[ExportWorker] Reset stale jobs', { count: result.modifiedCount });
+  }
+}
+
+async function cleanupOldJobs(db) {
+  const cutoff = new Date(Date.now() - RETENTION_HOURS * 60 * 60 * 1000);
+  const oldJobs = await db.collection(JOBS_COLLECTION)
+    .find({ status: { $in: ['completed', 'failed'] }, created_at: { $lt: cutoff } })
+    .limit(100)
+    .toArray();
+
+  if (oldJobs.length === 0) return;
+
+  for (const job of oldJobs) {
+    if (job.file_path) {
+      try { await fsp.unlink(job.file_path); } catch {}
+    }
+  }
+
+  await db.collection(JOBS_COLLECTION).deleteMany({ _id: { $in: oldJobs.map(j => j._id) } });
+  logger.info('[ExportWorker] Cleaned old jobs', { deleted: oldJobs.length });
+}
+
+async function processOneJob() {
+  if (isRunning) return;
+  let db;
+  try {
+    db = await getDb();
+  } catch (err) {
+    logger.error('[ExportWorker] DB connection error', { message: err.message });
+    return;
+  }
+
+  await resetStaleJobs(db);
+  await cleanupOldJobs(db);
+
+  const job = await db.collection(JOBS_COLLECTION).findOneAndUpdate(
+    { status: 'pending' },
+    { $set: { status: 'processing', started_at: new Date(), updated_at: new Date(), error: null } },
+    { sort: { created_at: 1 }, returnDocument: 'after' }
+  );
+
+  if (!job) return;
+
+  isRunning = true;
+  const jobId = job._id.toString();
+  const exportDir = getExportDir();
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const diskFileName = `call-report-${stamp}-${jobId}.csv`;
+  const downloadFileName = buildReadableFileName(job.filters || {});
+  const filePath = path.join(exportDir, diskFileName);
+  let stream;
+
+  logger.info('[ExportWorker] Processing job', { job_id: jobId });
+
+  try {
+    await fsp.mkdir(exportDir, { recursive: true });
+    stream = fs.createWriteStream(filePath, { encoding: 'utf8' });
+    stream.on('error', (err) => logger.error('[ExportWorker] Stream error', { job_id: jobId, message: err.message }));
+
+    const rowCount = await streamCsv({
+      db,
+      filters: job.filters || {},
+      user: job.requested_by || {},
+      writable: stream,
+      onProgress: async (rows) => {
+        await db.collection(JOBS_COLLECTION).updateOne(
+          { _id: job._id },
+          { $set: { rows_processed: rows, updated_at: new Date() } }
+        );
+      },
+    });
+
+    stream.end();
+    await once(stream, 'finish');
+    const stat = await fsp.stat(filePath);
+
+    await db.collection(JOBS_COLLECTION).updateOne(
+      { _id: job._id },
+      {
+        $set: {
+          status: 'completed',
+          rows_processed: rowCount,
+          file_name: downloadFileName,
+          file_path: filePath,
+          file_size: stat.size,
+          finished_at: new Date(),
+          updated_at: new Date(),
+        },
+      }
+    );
+    logger.info('[ExportWorker] Job completed', { job_id: jobId, rows: rowCount, size: stat.size });
+  } catch (err) {
+    if (stream) stream.destroy();
+    try { await fsp.unlink(filePath); } catch {}
+    await db.collection(JOBS_COLLECTION).updateOne(
+      { _id: job._id },
+      {
+        $set: {
+          status: 'failed',
+          error: err.message,
+          finished_at: new Date(),
+          updated_at: new Date(),
+        },
+      }
+    );
+    logger.error('[ExportWorker] Job failed', { job_id: jobId, message: err.message, stack: err.stack });
+  } finally {
+    isRunning = false;
+  }
+}
+
+function startExportWorker() {
+  logger.info('[ExportWorker] Started', { pollIntervalSec: POLL_INTERVAL_MS / 1000 });
+  processOneJob();
+  setInterval(processOneJob, POLL_INTERVAL_MS);
+}
+
+module.exports = {
+  startExportWorker,
+  createExportJob,
+  getExportJob,
+  streamCsv,
+};

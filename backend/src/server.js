@@ -16,6 +16,7 @@ const stationsRouter = require('./routes/stations');
 const { requireAuth } = require('./middleware/auth');
 const { startWorker } = require('./workers/analysisWorker');
 const { startBugCategoryWorker } = require('./workers/bugCategoryWorker');
+const { startExportWorker } = require('./workers/exportWorker');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -117,6 +118,7 @@ if (require.main === module) {
     logger.info(`Server started`, { port: PORT, env: process.env.NODE_ENV || 'development' });
     startWorker();
     startBugCategoryWorker();
+    startExportWorker();
   });
 
   // Graceful shutdown

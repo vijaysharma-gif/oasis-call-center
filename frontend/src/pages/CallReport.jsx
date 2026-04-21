@@ -4,7 +4,6 @@ import { useAuth } from '../contexts/AuthContext';
 import CallsTable from '../components/CallsTable';
 import CallTicketModal from '../components/CallTicketModal';
 import InitiateCallModal from '../components/InitiateCallModal';
-import ExcelJS from 'exceljs';
 import Pagination from '../components/Pagination';
 
 const API = import.meta.env.VITE_API_URL ?? '';
@@ -66,12 +65,19 @@ export default function CallReport() {
   const [ticketCall,  setTicketCall]  = useState(null);
   const [showDial,    setShowDial]    = useState(false);
   const [exporting,   setExporting]   = useState(false);
+  const [exportLabel, setExportLabel] = useState('');
   const [agents,      setAgents]      = useState([]);
   const [pageSize,    setPageSize]    = useState(25);
+  const mountedRef = useRef(true);
   const { token, isAdmin, user } = useAuth();
   const { minDate, maxDate }    = useDateRange(token);
   const agentMap                = useAgentMap(token, isAdmin);
   const stationMap              = useStationMap(token);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Fetch agent list for admin dropdown
   useEffect(() => {
@@ -112,56 +118,93 @@ export default function CallReport() {
     setPage(1);
   }
 
+  function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function fileNameFromDisposition(disposition, fallback) {
+    if (!disposition) return fallback;
+    const m = disposition.match(/filename="?([^";]+)"?/i);
+    return m?.[1] || fallback;
+  }
+
+  async function downloadExport(jobId, fallbackName) {
+    const res = await fetch(`${API}/api/calls/export/jobs/${jobId}/download`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      let err = 'Failed to download export';
+      try {
+        const data = await res.json();
+        if (data?.error) err = data.error;
+      } catch {
+        // ignore JSON parse errors from non-JSON responses
+      }
+      throw new Error(err);
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileNameFromDisposition(res.headers.get('content-disposition'), fallbackName);
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   async function handleExport() {
     setExporting(true);
+    setExportLabel('Queueing export...');
     try {
-      const params = new URLSearchParams();
-      if (search)        params.append('search',      search);
-      if (status)        params.append('status',      status);
-      if (effectiveFrom) params.append('dateFrom',    `${effectiveFrom}T00:00`);
-      if (effectiveTo)   params.append('dateTo',      `${effectiveTo}T23:59`);
-      if (agentNumber)   params.append('agentNumber', agentNumber);
+      const payload = {};
+      if (search) payload.search = search;
+      if (status) payload.status = status;
+      if (effectiveFrom) payload.dateFrom = `${effectiveFrom}T00:00`;
+      if (effectiveTo) payload.dateTo = `${effectiveTo}T23:59`;
+      if (agentNumber) payload.agentNumber = agentNumber;
 
-      const res  = await fetch(`${API}/api/calls/export?${params}`, { headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json();
+      const createRes = await fetch(`${API}/api/calls/export/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      const createData = await createRes.json();
+      if (!createRes.ok) throw new Error(createData.error || 'Failed to queue export');
 
-      const wrapCols = new Set(['Summary', 'Bug Description', 'Transcription']);
-      const wideCols = new Set(['Call ID', 'Recording URL']);
-      const cols = Object.keys(data.rows[0] || {});
+      const jobId = createData.job_id;
+      const fallbackName = `call-report-${effectiveFrom || 'all'}-to-${effectiveTo || 'all'}.csv`;
 
-      const wb = new ExcelJS.Workbook();
-      const ws = wb.addWorksheet('Call Report');
-      ws.columns = cols.map(h => ({
-        header: h, key: h,
-        width: wrapCols.has(h) ? 60 : wideCols.has(h) ? 30 : 18,
-      }));
-      ws.getRow(1).font = { bold: true };
+      for (let i = 0; i < 720; i += 1) {
+        if (!mountedRef.current) return;
+        await wait(2500);
+        const statusRes = await fetch(`${API}/api/calls/export/jobs/${jobId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const statusData = await statusRes.json();
+        if (!statusRes.ok) throw new Error(statusData.error || 'Failed to check export status');
 
-      for (const row of data.rows) {
-        ws.addRow(row);
+        if (statusData.status === 'completed') {
+          setExportLabel('Downloading...');
+          await downloadExport(jobId, statusData.file_name || fallbackName);
+          setExportLabel('Done');
+          return;
+        }
+        if (statusData.status === 'failed') {
+          throw new Error(statusData.error || 'Export failed');
+        }
+
+        const rows = Number(statusData.rows_processed || 0);
+        setExportLabel(rows > 0 ? `Processing ${rows.toLocaleString()} rows...` : 'Preparing file...');
       }
 
-      ws.eachRow((row, rowNum) => {
-        if (rowNum === 1) return;
-        row.eachCell((cell, colNum) => {
-          if (wrapCols.has(cols[colNum - 1])) {
-            cell.alignment = { wrapText: true, vertical: 'top' };
-          }
-        });
-      });
-
-      const buf = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `call-report-${effectiveFrom || 'all'}-to-${effectiveTo || 'all'}.xlsx`;
-      link.click();
-      URL.revokeObjectURL(url);
+      throw new Error('Export timed out. Please narrow your date range and try again.');
     } catch (e) {
       alert(`Export failed: ${e.message}`);
     } finally {
-      setExporting(false);
+      if (mountedRef.current) {
+        setExporting(false);
+        setTimeout(() => { if (mountedRef.current) setExportLabel(''); }, 2500);
+      }
     }
   }
 
@@ -271,7 +314,7 @@ export default function CallReport() {
           <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M8 2v8M5 7l3 3 3-3M2 12v1a1 1 0 001 1h10a1 1 0 001-1v-1"/>
           </svg>
-          {exporting ? 'Exporting…' : 'Export XLSX'}
+          {exporting ? (exportLabel || 'Exporting...') : 'Export CSV'}
         </button>
       </div>
 

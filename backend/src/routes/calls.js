@@ -1,13 +1,62 @@
 const express = require('express');
+const fs = require('fs/promises');
+const path = require('path');
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { createExportJob, getExportJob, streamCsv } = require('../workers/exportWorker');
 const logger = require('../logger');
 
 const router = express.Router();
 
 // All calls routes require authentication
 router.use(requireAuth);
+
+function pickExportFilters(src = {}) {
+  const pick = k => typeof src[k] === 'string' ? src[k].trim() : '';
+  return {
+    search: pick('search'),
+    status: pick('status'),
+    dateFrom: pick('dateFrom'),
+    dateTo: pick('dateTo'),
+    agentNumber: pick('agentNumber'),
+  };
+}
+
+function toDayToken(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+}
+
+function slugPart(value, maxLen = 20) {
+  if (!value) return '';
+  const cleaned = String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, maxLen);
+  return cleaned;
+}
+
+function buildDirectExportFileName(filters = {}) {
+  const from = toDayToken(filters.dateFrom) || 'all';
+  const to = toDayToken(filters.dateTo) || 'today';
+  const parts = ['call-report', `${from}-to-${to}`];
+  const status = slugPart(filters.status, 16);
+  if (status) parts.push(status);
+  const agent = slugPart(filters.agentNumber, 20);
+  if (agent) parts.push(`agent-${agent}`);
+  return `${parts.join('-')}.csv`;
+}
+
+function canAccessJob(job, user) {
+  if (!job) return false;
+  if (user?.role === 'admin') return true;
+  return job.requested_by?.agent_number && user?.agent_number && job.requested_by.agent_number === user.agent_number;
+}
 
 router.get('/', async (req, res) => {
   const db = await getDb();
@@ -97,100 +146,77 @@ router.get('/', async (req, res) => {
   res.json({ calls, total });
 });
 
-// GET /api/calls/export — all filtered records (no pagination) for XLSX export
+// POST /api/calls/export/jobs - queue large export in background
+router.post('/export/jobs', async (req, res) => {
+  const filters = pickExportFilters(req.body || {});
+  const jobId = await createExportJob({ filters, user: req.user });
+  res.status(202).json({ job_id: jobId, status: 'pending' });
+});
+
+// GET /api/calls/export/jobs/:id - job status
+router.get('/export/jobs/:id', async (req, res) => {
+  const job = await getExportJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Export job not found' });
+  if (!canAccessJob(job, req.user)) return res.status(403).json({ error: 'Access denied' });
+
+  res.json({
+    job_id: job._id.toString(),
+    status: job.status,
+    rows_processed: job.rows_processed || 0,
+    file_name: job.file_name || null,
+    file_size: job.file_size || null,
+    error: job.error || null,
+    created_at: job.created_at,
+    started_at: job.started_at || null,
+    finished_at: job.finished_at || null,
+    download_url: job.status === 'completed' ? '/api/calls/export/jobs/' + job._id.toString() + '/download' : null,
+  });
+});
+
+// GET /api/calls/export/jobs/:id/download - download completed export file
+router.get('/export/jobs/:id/download', async (req, res) => {
+  const job = await getExportJob(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Export job not found' });
+  if (!canAccessJob(job, req.user)) return res.status(403).json({ error: 'Access denied' });
+  if (job.status !== 'completed') return res.status(409).json({ error: 'Export is not ready yet' });
+  if (!job.file_path) return res.status(404).json({ error: 'Export file missing' });
+
+  const baseDir = path.resolve(process.env.LOG_DIR || path.join(__dirname, '../../logs'), 'exports');
+  const filePath = path.resolve(job.file_path);
+  if (!filePath.startsWith(baseDir)) return res.status(400).json({ error: 'Invalid export path' });
+
+  try {
+    await fs.access(filePath);
+  } catch {
+    return res.status(404).json({ error: 'Export file not found on disk' });
+  }
+
+  res.download(filePath, job.file_name || path.basename(filePath), (err) => {
+    if (err && !res.headersSent) res.status(500).json({ error: 'Failed to download export' });
+  });
+});
+
+// GET /api/calls/export - direct streaming CSV export (best for smaller ranges)
 router.get('/export', async (req, res) => {
   const db = await getDb();
-  const { search, status, dateFrom, dateTo, agentNumber } = req.query;
+  const filters = pickExportFilters(req.query || {});
+  const fileName = buildDirectExportFileName(filters);
 
-  const conditions = [];
-
-  if (req.user.role === 'agent') {
-    conditions.push({
-      $or: [
-        { agent_number: req.user.agent_number },
-        { caller_number: req.user.agent_number },
-        { called_number: req.user.agent_number },
-        { agent_answer_time: { $exists: false } },
-        { agent_answer_time: '' },
-      ],
+  try {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    await streamCsv({ db, filters, user: req.user, writable: res });
+    res.end();
+  } catch (err) {
+    logger.error('Direct export failed', {
+      message: err.message,
+      stack: err.stack,
+      user: req.user?.name,
+      role: req.user?.role,
     });
+    if (!res.headersSent) return res.status(500).json({ error: 'Export failed' });
+    res.destroy(err);
   }
-
-  if (search) {
-    conditions.push({ $or: [
-      { caller_number: { $regex: search, $options: 'i' } },
-      { called_number: { $regex: search, $options: 'i' } },
-      { agent_name:    { $regex: search, $options: 'i' } },
-      { agent_number:  { $regex: search, $options: 'i' } },
-    ]});
-  }
-
-  if (status === 'received') {
-    conditions.push({ agent_answer_time: { $exists: true, $ne: '' } });
-  } else if (status === 'missed') {
-    conditions.push({ $or: [{ agent_answer_time: { $exists: false } }, { agent_answer_time: '' }] });
-  }
-
-  if (dateFrom || dateTo) {
-    const dc = {};
-    if (dateFrom) dc.$gte = new Date(dateFrom);
-    if (dateTo)   dc.$lte = new Date(dateTo);
-    conditions.push({ created_at: dc });
-  }
-
-  if (agentNumber && req.user.role === 'admin') {
-    conditions.push({ agent_number: agentNumber });
-  }
-
-  const filter = conditions.length > 0 ? { $and: conditions } : {};
-
-  const docs = await db.collection('calls').find(filter).sort({ created_at: -1 }).toArray();
-
-  const agentNumbers = [...new Set(docs.map(d => d.agent_number).filter(Boolean))];
-  const agentDocs = agentNumbers.length
-    ? await db.collection('agents').find({ agent_number: { $in: agentNumbers } }, { projection: { agent_number: 1, name: 1 } }).toArray()
-    : [];
-  const agentNameMap = Object.fromEntries(agentDocs.map(a => [a.agent_number, a.name]));
-
-  // Join analysis data
-  const callIds = docs.map(d => d.call_id).filter(Boolean);
-  const analysisDocs = callIds.length
-    ? await db.collection('call_analysis').find({ call_id: { $in: callIds }, status: 'completed' }).toArray()
-    : [];
-  const analysisMap = Object.fromEntries(analysisDocs.map(a => [a.call_id, a]));
-
-  const fmt = v => v ? new Date(v).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '';
-
-  const rows = docs.map(doc => {
-    const a = analysisMap[doc.call_id] || {};
-    return {
-      'Call ID':          doc.call_id || '',
-      'Caller Number':    doc.caller_number || '',
-      'Called Number':    doc.called_number || '',
-      'Agent Name':       agentNameMap[doc.agent_number] || doc.agent_name || '',
-      'Agent Number':     doc.agent_number || '',
-      'Status':           doc.agent_answer_time ? 'Received' : 'Missed',
-      'Call Start Time':  fmt(doc.call_start_time),
-      'Answer Time':      fmt(doc.agent_answer_time),
-      'Call End Time':    fmt(doc.call_end_time),
-      'Duration (s)':     doc.duration || 0,
-      'Agent Duration (s)': doc.agent_duration || 0,
-      'Call Category':    a.call_category || '',
-      'Sub-Category':     a.ai_insight || '',
-      'Summary':          (a.summary || '').replace(/\n/g, '\r\n'),
-      'Bug Category':     a.bug_category || '',
-      'Bug Description':  a.bugs || '',
-      'Call Resolved':    a.call_resolved || '',
-      'Agent Score':      a.agent_score ?? '',
-      'Audio Rating':     a.audio_quality?.rating || '',
-      'Language':         Array.isArray(a.language) ? a.language.join(', ') : (a.language || ''),
-      'Recording URL':    doc.call_recording || '',
-      'Transcription':    (a.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim(),
-      'Created At':       fmt(doc.created_at),
-    };
-  });
-
-  res.json({ rows });
 });
 
 router.get('/stats/summary', async (req, res) => {
@@ -442,3 +468,4 @@ router.patch('/:id/recording', async (req, res) => {
 
 
 module.exports = router;
+
