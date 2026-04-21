@@ -3,7 +3,7 @@ const fs = require('fs/promises');
 const path = require('path');
 const jwt = require('jsonwebtoken');
 const { getDb } = require('../db');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { createExportJob, getExportJob } = require('../workers/exportWorker');
 
 const router = express.Router();
@@ -96,6 +96,95 @@ router.get('/export/jobs/:id', async (req, res) => {
     file_size: job.file_size || null,
     error: job.error || null,
     download_url: downloadUrl,
+  });
+});
+
+// POST /api/analysis/retry-failed — admin-only: requeue records that exhausted retries.
+// Body (all optional):
+//   call_ids:   string[]   specific records to reset (takes priority over other filters)
+//   since:      ISO date   only records created at or after this
+//   until:      ISO date   only records created at or before this
+//   all:        boolean    if true, reset every failed record (ignores limit safety cap)
+//   limit:      number     max records to reset (default 1000, max 100000)
+//   reason:     string     free-text note, stored on each record for audit
+//
+// By default the endpoint caps at 1000 to avoid accidentally kicking off a huge
+// Gemini batch. Pass { "all": true } (or a large `limit`) to override.
+router.post('/retry-failed', requireAdmin, async (req, res) => {
+  const db = await getDb();
+  const { call_ids, since, until, reason, all } = req.body || {};
+  const rawLimit = Number(req.body?.limit);
+  const limit = all
+    ? 1_000_000
+    : Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 1000, 1), 100_000);
+
+  // Base filter: only records currently marked failed (terminal state)
+  const filter = { status: 'failed' };
+
+  if (Array.isArray(call_ids) && call_ids.length > 0) {
+    filter.call_id = { $in: call_ids.filter(id => typeof id === 'string' && id.trim()) };
+  } else {
+    const dateRange = {};
+    if (since) {
+      const d = new Date(since);
+      if (!Number.isNaN(d.getTime())) dateRange.$gte = d;
+    }
+    if (until) {
+      const d = new Date(until);
+      if (!Number.isNaN(d.getTime())) dateRange.$lte = d;
+    }
+    if (Object.keys(dateRange).length > 0) filter.created_at = dateRange;
+  }
+
+  const matched = await db.collection('call_analysis').countDocuments(filter);
+  if (matched === 0) {
+    return res.json({ ok: true, matched: 0, reset: 0, message: 'No failed records match the filter' });
+  }
+
+  const retryMeta = {
+    status: 'pending',
+    attempts: 0,
+    error: null,
+    last_error: null,
+    next_attempt_at: null,
+    processing_id: null,
+    retry_requested_at: new Date(),
+    retry_requested_by: req.user?.name || req.user?.role || 'admin',
+    retry_reason: typeof reason === 'string' ? reason.trim().slice(0, 200) : null,
+    updated_at: new Date(),
+  };
+
+  // Fast path: resetting all matching records — a single bulk updateMany is
+  // much cheaper than fetching _ids then updating.
+  if (matched <= limit) {
+    const result = await db.collection('call_analysis').updateMany(filter, { $set: retryMeta });
+    return res.json({
+      ok: true,
+      matched,
+      reset: result.modifiedCount,
+      limited: false,
+      message: `Reset ${result.modifiedCount} failed record(s) to pending; the worker will pick them up on its next tick.`,
+    });
+  }
+
+  // Bounded path: more matches than our limit — pick the newest `limit` records
+  const ids = await db.collection('call_analysis')
+    .find(filter, { projection: { _id: 1 } })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  const result = await db.collection('call_analysis').updateMany(
+    { _id: { $in: ids.map(d => d._id) } },
+    { $set: retryMeta }
+  );
+
+  res.json({
+    ok: true,
+    matched,
+    reset: result.modifiedCount,
+    limited: true,
+    message: `Reset ${result.modifiedCount} of ${matched} failed record(s) (limited by 'limit'); pass {"all": true} to reset everything.`,
   });
 });
 
