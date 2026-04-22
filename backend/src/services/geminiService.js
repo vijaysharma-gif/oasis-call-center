@@ -329,9 +329,34 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
 
 // ─── Core analysis function ───────────────────────────────────────────────────
 
+// Detect runaway/looping transcriptions. Gemini (especially -lite variants) can
+// fall into repetition loops on ambiguous audio, producing the same dialog line
+// hundreds of times. Such outputs bloat the DB and break Excel (per-cell limit
+// is 32,767 chars). Any non-short line repeating past the threshold, or a total
+// length beyond a sane hard cap, counts as a loop.
+function detectTranscriptionLoop(text, opts = {}) {
+  if (typeof text !== 'string' || text.length === 0) return false;
+  const minLineLen     = opts.minLineLen     ?? 80;
+  const maxRepeats     = opts.maxRepeats     ?? 10;
+  const hardLimitChars = opts.hardLimitChars ?? 50_000;
+
+  if (text.length > hardLimitChars) return true;
+
+  const counts = new Map();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length < minLineLen) continue;
+    const n = (counts.get(line) || 0) + 1;
+    if (n > maxRepeats) return true;
+    counts.set(line, n);
+  }
+  return false;
+}
+
 async function categorizeRecording(audioUrl, { callCategories = [], bugCategories = [] } = {}, maxRetries = 3) {
   const apiKey = process.env.GEMINI_API_KEY;
   const model  = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  const maxOutputTokens = Math.max(1024, Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 8192);
 
   if (!apiKey) return { success: false, error: 'GEMINI_API_KEY not set' };
 
@@ -498,7 +523,7 @@ OUTPUT FORMAT (must match exactly):
             { file_data: { mime_type: 'audio/x-wav', file_uri: fileUri } },
           ],
         }],
-        generationConfig: { response_mime_type: 'application/json' },
+        generationConfig: { response_mime_type: 'application/json', maxOutputTokens },
       };
 
       logger.debug('Gemini running analysis');
@@ -540,6 +565,17 @@ OUTPUT FORMAT (must match exactly):
       }
 
       if (analysis.error) return { success: false, error: analysis.error };
+
+      // Reject looping transcriptions as permanent failure. Retrying the same
+      // audio with the same model will just reproduce the loop — burn no more
+      // quota. Admin can re-queue via /api/analysis/reset-loops after tuning.
+      if (detectTranscriptionLoop(analysis.transcription)) {
+        logger.warn('Gemini transcription loop detected', {
+          call_id_hint: audioUrl?.slice(-40),
+          transcription_chars: (analysis.transcription || '').length,
+        });
+        return { success: false, permanent: true, error: 'transcription_loop_detected' };
+      }
 
       logger.info('Gemini analysis complete', { totalSec: ((Date.now() - startTime) / 1000).toFixed(1), analysisSec: ((Date.now() - genStart) / 1000).toFixed(1) });
 
@@ -591,4 +627,4 @@ OUTPUT FORMAT (must match exactly):
   return { success: false, error: 'Max retries exceeded' };
 }
 
-module.exports = { categorizeRecording, CATEGORIZATION_SCHEMA };
+module.exports = { categorizeRecording, CATEGORIZATION_SCHEMA, detectTranscriptionLoop };

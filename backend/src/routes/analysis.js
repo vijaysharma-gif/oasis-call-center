@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const { getDb } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { createExportJob, getExportJob } = require('../workers/exportWorker');
+const { detectTranscriptionLoop } = require('../services/geminiService');
 
 const router = express.Router();
 
@@ -370,6 +371,142 @@ router.post('/reset-backoff', requireAdmin, async (req, res) => {
     reset_attempts: !!reset_attempts,
     limited: true,
     message: `Cleared backoff on ${result.modifiedCount} of ${matched} record(s) (limited); pass {"all": true} to release all.`,
+  });
+});
+
+// POST /api/analysis/reset-loops — admin-only: clear analysis on records whose
+// stored transcription shows a Gemini repetition loop, and re-queue them for
+// re-analysis. Targets status='completed' records whose transcription is
+// suspiciously long AND passes the in-code loop detector, plus status='failed'
+// records tagged with error='transcription_loop_detected'. Never touches
+// status='processing' records — those belong to an active worker.
+//
+// Body (all optional):
+//   call_ids:                 string[]  specific records (takes priority)
+//   since:                    ISO date  only records created at or after this
+//   until:                    ISO date  only records created at or before this
+//   min_transcription_chars:  number    DB-side length prefilter (default 32000,
+//                                       min 1000). Excel's per-cell cap is 32,767.
+//   include_failed:           boolean   include failed records with the loop
+//                                       marker (default true)
+//   dry_run:                  boolean   scan and report without mutating
+//   all:                      boolean   bypass the safety cap
+//   limit:                    number    max candidates scanned (default 1000,
+//                                       max 100000)
+//   reason:                   string    audit note stored on each record
+router.post('/reset-loops', requireAdmin, async (req, res) => {
+  const db = await getDb();
+  const { call_ids, since, until, reason, all, dry_run } = req.body || {};
+  const includeFailed = req.body?.include_failed !== false; // default true
+  const rawLimit = Number(req.body?.limit);
+  const limit = all
+    ? 1_000_000
+    : Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 1000, 1), 100_000);
+  const minChars = Math.max(1000, Number(req.body?.min_transcription_chars) || 32000);
+
+  // Two OR-branches:
+  //  (a) completed + suspiciously-long transcription → verify loop in Node
+  //  (b) failed with the loop marker (already confirmed at write time)
+  // Explicitly excludes status='processing' so we never race the worker.
+  const orBranches = [
+    {
+      status: 'completed',
+      transcription: { $type: 'string' },
+      $expr: { $gte: [{ $strLenCP: { $ifNull: ['$transcription', ''] } }, minChars] },
+    },
+  ];
+  if (includeFailed) {
+    orBranches.push({ status: 'failed', error: 'transcription_loop_detected' });
+  }
+  const filter = { $or: orBranches };
+
+  if (Array.isArray(call_ids) && call_ids.length > 0) {
+    filter.call_id = { $in: call_ids.filter(id => typeof id === 'string' && id.trim()) };
+  } else {
+    const dateRange = {};
+    if (since) { const d = new Date(since); if (!Number.isNaN(d.getTime())) dateRange.$gte = d; }
+    if (until) { const d = new Date(until); if (!Number.isNaN(d.getTime())) dateRange.$lte = d; }
+    if (Object.keys(dateRange).length > 0) filter.created_at = dateRange;
+  }
+
+  // Scan candidates. Pull transcription + status so we can verify the loop in
+  // Node (cheap per-row) and confirm status at update time (prevents races).
+  const candidates = await db.collection('call_analysis')
+    .find(filter, { projection: { _id: 1, call_id: 1, status: 1, transcription: 1 } })
+    .sort({ created_at: -1 })
+    .limit(limit)
+    .toArray();
+
+  // For completed records, re-verify with the full detector. For failed records
+  // already tagged with the loop marker, accept them directly.
+  const toReset = candidates.filter(c =>
+    (c.status === 'failed') || detectTranscriptionLoop(c.transcription)
+  );
+
+  if (toReset.length === 0) {
+    return res.json({
+      ok: true,
+      matched: candidates.length,
+      reset: 0,
+      message: 'No looping transcriptions matched the filter',
+    });
+  }
+
+  if (dry_run) {
+    return res.json({
+      ok: true,
+      dry_run: true,
+      matched: candidates.length,
+      would_reset: toReset.length,
+      sample_call_ids: toReset.slice(0, 20).map(d => d.call_id),
+      message: `Dry run: would reset ${toReset.length} record(s) to pending.`,
+    });
+  }
+
+  const now = new Date();
+  const resetMeta = {
+    status: 'pending',
+    attempts: 0,
+    error: null,
+    last_error: null,
+    next_attempt_at: null,
+    processing_id: null,
+    transcription: '',
+    summary: '',
+    ai_insight: '',
+    bugs: '',
+    category: '',
+    sub_category: '',
+    call_category: '',
+    bug_category: '',
+    agent_score: null,
+    call_resolved: '',
+    audio_quality: null,
+    language: [],
+    loop_reset_at: now,
+    loop_reset_by: req.user?.name || req.user?.role || 'admin',
+    loop_reset_reason: typeof reason === 'string' ? reason.trim().slice(0, 200) : null,
+    updated_at: now,
+  };
+
+  // Re-check status in the update filter so we don't clobber a record that
+  // transitioned (e.g. the webhook re-enqueued it, or another admin reset it)
+  // between our scan and our write.
+  const result = await db.collection('call_analysis').updateMany(
+    {
+      _id: { $in: toReset.map(d => d._id) },
+      status: { $in: ['completed', 'failed'] },
+    },
+    { $set: resetMeta }
+  );
+
+  res.json({
+    ok: true,
+    matched: candidates.length,
+    reset: result.modifiedCount,
+    skipped: toReset.length - result.modifiedCount,
+    sample_call_ids: toReset.slice(0, 20).map(d => d.call_id),
+    message: `Reset ${result.modifiedCount} record(s) with looping transcriptions to pending; the worker will re-analyse them on its next tick.`,
   });
 });
 
