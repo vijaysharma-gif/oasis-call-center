@@ -198,6 +198,25 @@ function buildCallsPipeline(filter) {
   ];
 }
 
+// Split transcription into speaker-labeled lines and normalize every line break
+// to \r\n so Excel and strict CSV parsers don't misinterpret bare \n inside
+// a CRLF-ended file.
+function formatTranscription(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .replace(/\r\n?/g, '\n')                                  // normalize mixed endings
+    .replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1')          // put each speaker on its own line
+    .replace(/\n{2,}/g, '\n')                                 // collapse runs
+    .trim()
+    .replace(/\n/g, '\r\n');                                  // emit CRLF everywhere
+}
+
+// Same idea for summary — keep paragraph breaks but use CRLF.
+function normalizeMultiline(raw) {
+  if (!raw) return '';
+  return String(raw).replace(/\r\n?/g, '\n').replace(/\n/g, '\r\n');
+}
+
 function callsToCsvRecord(doc) {
   const a = doc.analysis || {};
   return {
@@ -214,7 +233,7 @@ function callsToCsvRecord(doc) {
     'Agent Duration (s)': doc.agent_duration || 0,
     'Call Category': a.call_category || '',
     'Sub-Category': a.ai_insight || '',
-    'Summary': (a.summary || '').replace(/\n/g, '\r\n'),
+    'Summary': normalizeMultiline(a.summary),
     'Bug Category': a.bug_category || '',
     'Bug Description': a.bugs || '',
     'Call Resolved': a.call_resolved || '',
@@ -222,7 +241,7 @@ function callsToCsvRecord(doc) {
     'Audio Rating': a.audio_quality?.rating || '',
     'Language': Array.isArray(a.language) ? a.language.join(', ') : (a.language || ''),
     'Recording URL': doc.call_recording || '',
-    'Transcription': (a.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim(),
+    'Transcription': formatTranscription(a.transcription),
     'Created At': formatDate(doc.created_at),
   };
 }
@@ -314,7 +333,7 @@ function analysisToCsvRecord(doc) {
     'Sub-Category':    doc.ai_insight || '',
     'Gemini Category': doc.category || '',
     'Gemini Sub-Cat':  doc.sub_category || '',
-    'Summary':         (doc.summary || '').replace(/\n/g, '\r\n'),
+    'Summary':         normalizeMultiline(doc.summary),
     'Bug Category':    doc.bug_category || '',
     'Bug Description': doc.bugs || '',
     'Call Resolved':   doc.call_resolved || '',
@@ -327,7 +346,7 @@ function analysisToCsvRecord(doc) {
     'Duration (s)':    doc.duration ?? '',
     'Recording':       doc.call_recording || '',
     'Date':            formatDate(doc.call_start_time || doc.created_at),
-    'Transcription':   (doc.transcription || '').replace(/(CANDIDATE:|AGENT:|SYSTEM:)/g, '\n$1').replace(/\n{2,}/g, '\n').trim(),
+    'Transcription':   formatTranscription(doc.transcription),
   };
 }
 

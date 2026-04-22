@@ -278,6 +278,101 @@ router.post('/retry-failed', requireAdmin, async (req, res) => {
   });
 });
 
+// POST /api/analysis/reset-backoff — admin-only: clear scheduled retry timestamps
+// so records waiting on exponential backoff become eligible for the next worker
+// tick immediately. Useful after fixing an external issue (Gemini key, rate
+// limit window, network) when you don't want to wait minutes for the backoff
+// to elapse naturally.
+//
+// Body (all optional):
+//   call_ids:        string[]  specific records (takes priority over filters)
+//   since:           ISO date  only records updated at or after this
+//   until:           ISO date  only records updated at or before this
+//   reset_attempts:  boolean   also reset `attempts` to 0 (fresh 5-attempt budget)
+//   all:             boolean   bypass the safety cap
+//   limit:           number    max records (default 1000, max 100000)
+//   reason:          string    audit note stored on each record
+router.post('/reset-backoff', requireAdmin, async (req, res) => {
+  const db = await getDb();
+  const { call_ids, since, until, reason, all, reset_attempts } = req.body || {};
+  const rawLimit = Number(req.body?.limit);
+  const limit = all
+    ? 1_000_000
+    : Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 1000, 1), 100_000);
+
+  // Only targets pending records with a future next_attempt_at — those are the
+  // ones actually sitting in exponential-backoff limbo. status='processing' is
+  // handled by the stale-lock reset; status='failed' is handled by /retry-failed.
+  const now = new Date();
+  const filter = {
+    status: 'pending',
+    next_attempt_at: { $gt: now },
+  };
+
+  if (Array.isArray(call_ids) && call_ids.length > 0) {
+    filter.call_id = { $in: call_ids.filter(id => typeof id === 'string' && id.trim()) };
+  } else {
+    const dateRange = {};
+    if (since) { const d = new Date(since); if (!Number.isNaN(d.getTime())) dateRange.$gte = d; }
+    if (until) { const d = new Date(until); if (!Number.isNaN(d.getTime())) dateRange.$lte = d; }
+    if (Object.keys(dateRange).length > 0) filter.updated_at = dateRange;
+  }
+
+  const matched = await db.collection('call_analysis').countDocuments(filter);
+  if (matched === 0) {
+    return res.json({
+      ok: true,
+      matched: 0,
+      reset: 0,
+      message: 'No pending records are currently waiting on a scheduled retry',
+    });
+  }
+
+  const resetMeta = {
+    next_attempt_at: null,
+    updated_at: now,
+    backoff_reset_at: now,
+    backoff_reset_by: req.user?.name || req.user?.role || 'admin',
+    backoff_reset_reason: typeof reason === 'string' ? reason.trim().slice(0, 200) : null,
+  };
+  if (reset_attempts) resetMeta.attempts = 0;
+
+  // Fast path: all matches fit under the cap
+  if (matched <= limit) {
+    const result = await db.collection('call_analysis').updateMany(filter, { $set: resetMeta });
+    return res.json({
+      ok: true,
+      matched,
+      reset: result.modifiedCount,
+      reset_attempts: !!reset_attempts,
+      limited: false,
+      message: `Cleared backoff on ${result.modifiedCount} record(s); the worker will pick them up on its next tick.`,
+    });
+  }
+
+  // Bounded path — pick the ones whose retry would happen soonest first, so the
+  // user sees quickest movement (they were closest to being processed anyway).
+  const ids = await db.collection('call_analysis')
+    .find(filter, { projection: { _id: 1 } })
+    .sort({ next_attempt_at: 1 })
+    .limit(limit)
+    .toArray();
+
+  const result = await db.collection('call_analysis').updateMany(
+    { _id: { $in: ids.map(d => d._id) } },
+    { $set: resetMeta }
+  );
+
+  res.json({
+    ok: true,
+    matched,
+    reset: result.modifiedCount,
+    reset_attempts: !!reset_attempts,
+    limited: true,
+    message: `Cleared backoff on ${result.modifiedCount} of ${matched} record(s) (limited); pass {"all": true} to release all.`,
+  });
+});
+
 // GET /api/analysis/:call_id — fetch analysis for a specific call
 router.get('/:call_id', async (req, res) => {
   const db  = await getDb();

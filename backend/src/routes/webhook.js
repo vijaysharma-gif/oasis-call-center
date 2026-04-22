@@ -10,10 +10,28 @@ function normalizeNumber(num) {
   return digits.slice(-10);
 }
 
+// Accept only recording URLs that end in a real audio file extension.
+// Missed calls sometimes arrive with just the directory prefix (e.g.
+// ".../202604/1445/") — those would always fail Gemini analysis with 403/404,
+// so we drop them at ingestion.
+const AUDIO_EXT_RE = /\.(wav|mp3|m4a|mp4|aac|ogg|flac)(\?|#|$)/i;
+
+function isValidRecordingUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  // Must start with http(s) and end with a known audio extension
+  if (!/^https?:\/\//i.test(trimmed)) return false;
+  return AUDIO_EXT_RE.test(trimmed);
+}
+
 const router = express.Router();
 
 function extractCall(payload) {
   const p = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k.toLowerCase().replace(/\s+/g, ''), v]));
+  const rawRecording = p.call_recording || p.callrecording || p.recording_url || p.recording || p.recurl || p.file_url || p.audio_url || '';
+  // Drop URLs that aren't a real audio file — they'd only fail Gemini analysis.
+  const call_recording = isValidRecordingUrl(rawRecording) ? String(rawRecording).trim() : '';
   return {
     call_id:           p.call_id || p.callid || p.uid || p.id || `wb_${Date.now()}`,
     caller_number:     p.caller_number || p.callernumber || p.caller || '',
@@ -24,7 +42,7 @@ function extractCall(payload) {
     agent_answer_time: p.agent_answer_time || p.agentanswertime || p.answer_time || '',
     call_end_time:     p.call_end_time || p.callendtime || p.end_time || '',
     duration:          parseInt(p.duration || p.call_duration || 0) || 0,
-    call_recording:    p.call_recording || p.callrecording || p.recording_url || p.recording || p.recurl || p.file_url || p.audio_url || '',
+    call_recording,
     agent_duration:    (() => { const v = parseInt(p.agent_duration || p.agentduration || 0) || 0; return v > 86400 ? 0 : v; })(),
   };
 }
@@ -93,11 +111,18 @@ router.all('/', async (req, res) => {
     await upsertCall(db, call);
     logger.info('Webhook saved call', { call_id: call.call_id });
 
-    // Auto-enqueue for AI analysis if a recording URL is present
-    if (call.call_recording) {
+    // Auto-enqueue for AI analysis if a valid recording URL is present.
+    // (extractCall already blanks invalid URLs — this is just belt & suspenders.)
+    if (call.call_recording && isValidRecordingUrl(call.call_recording)) {
       enqueueRecording(call.call_id, call.call_recording).catch(err =>
         logger.error('Webhook enqueue error', { error: err.message })
       );
+    } else if (payload.call_recording || payload.recording_url) {
+      // We received a URL but it's not a real audio file — record for observability
+      logger.debug('Webhook skipped enqueue: non-audio recording URL', {
+        call_id: call.call_id,
+        url: (payload.call_recording || payload.recording_url || '').slice(0, 120),
+      });
     }
 
     res.json({ status: 'ok', call_id: call.call_id });
