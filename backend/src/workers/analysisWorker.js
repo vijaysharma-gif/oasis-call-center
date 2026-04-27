@@ -170,6 +170,8 @@ async function processRecord(db, record) {
             audio_quality:     result.audio_quality,
             transcription:     result.transcription,
             language:          result.language,
+            model_used:        result.model_used || null,
+            used_fallback:     !!result.used_fallback,
             error:             null,
             last_error:        null,
             next_attempt_at:   null,

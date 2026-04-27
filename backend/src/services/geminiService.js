@@ -241,21 +241,30 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 300_000) {
 
 // ─── Gemini rate-limit gate (module-level, shared across concurrent jobs) ────
 // Two safeguards:
-//   1. Minimum spacing between any two outgoing Gemini calls. With concurrency
-//      = 5 and ~30s/call, we'd naturally do ~10 RPM, but bursts on cache-warm
-//      or queue-drain can spike. The gate caps peak RPM regardless.
-//   2. Global pause when Gemini returns 429. We honor `Retry-After` (seconds
-//      or HTTP date), and every concurrent worker waits at the same gate, so
-//      one rate-limit hit doesn't immediately get re-tripped by 4 siblings.
+//   1. Minimum spacing between ALL outgoing Gemini calls. Caps peak RPM
+//      regardless of worker concurrency. Single global slot.
+//   2. Per-scope cooldown when Gemini returns 429. Scope is either a model
+//      name (e.g. 'gemini-2.5-flash') for generateContent calls, or the
+//      sentinel '__upload__' for Files API calls — Gemini limits these
+//      separately, and our fallback-on-429 logic relies on the model
+//      cooldown being independent so we can route to flash-lite while
+//      flash itself is still cooling down.
 const GEMINI_MIN_INTERVAL_MS = Math.max(0, Number(process.env.GEMINI_MIN_INTERVAL_MS) || 200);
-let _nextSlotAt = 0;          // earliest time the next request may fire
-let _rateLimitedUntil = 0;    // global cooldown deadline from a 429
+const UPLOAD_SCOPE = '__upload__';
+let _nextSlotAt = 0;                           // global min-interval gate
+const _cooldowns = new Map();                  // scope -> until-timestamp (ms)
 
-async function awaitGeminiSlot() {
-  // Serialize the slot computation in a tight burst — JS single-threaded so
-  // updating _nextSlotAt synchronously per call is enough.
+function getCooldown(scope) {
+  return _cooldowns.get(scope) || 0;
+}
+
+async function awaitGeminiSlot(scope = null) {
+  // Wait for whichever is later: the global min-interval or this scope's
+  // 429 cooldown. Other scopes' cooldowns don't block us — that's the whole
+  // point of per-scope tracking.
   const now = Date.now();
-  const slot = Math.max(now, _nextSlotAt, _rateLimitedUntil);
+  const cooldown = scope ? getCooldown(scope) : 0;
+  const slot = Math.max(now, _nextSlotAt, cooldown);
   _nextSlotAt = slot + GEMINI_MIN_INTERVAL_MS;
   const waitMs = slot - now;
   if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
@@ -275,12 +284,16 @@ function parseRetryAfter(headerValue) {
   return 30;
 }
 
-// Mark a global cooldown so all in-flight workers pause at the gate together.
-function markGeminiRateLimited(retryAfterSec, source) {
+// Set a cooldown for a specific scope (model name or '__upload__'). All other
+// scopes continue normally — this is what enables fallback to a sibling model
+// when one is rate-limited.
+function markGeminiRateLimited(retryAfterSec, source, scope) {
+  if (!scope) return;
   const until = Date.now() + retryAfterSec * 1000;
-  if (until > _rateLimitedUntil) {
-    _rateLimitedUntil = until;
-    logger.warn('Gemini rate limit hit — pausing all workers', { retryAfterSec, source });
+  const prev = _cooldowns.get(scope) || 0;
+  if (until > prev) {
+    _cooldowns.set(scope, until);
+    logger.warn('Gemini rate limit hit', { retryAfterSec, source, scope });
   }
 }
 
@@ -337,7 +350,7 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
   }
 
   // Hold for the rate-limit gate before initiating the upload session.
-  await awaitGeminiSlot();
+  await awaitGeminiSlot(UPLOAD_SCOPE);
 
   // ── Step A: Initiate resumable upload session ─────────────────────────────
   const initResp = await fetchWithTimeout(
@@ -358,7 +371,7 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
 
   if (!initResp.ok) {
     if (initResp.status === 429) {
-      markGeminiRateLimited(parseRetryAfter(initResp.headers.get('retry-after')), 'upload-init');
+      markGeminiRateLimited(parseRetryAfter(initResp.headers.get('retry-after')), 'upload-init', UPLOAD_SCOPE);
     }
     throw new Error(`Gemini upload init failed: HTTP ${initResp.status} ${await initResp.text()}`);
   }
@@ -384,7 +397,7 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
 
   if (!uploadResp.ok) {
     if (uploadResp.status === 429) {
-      markGeminiRateLimited(parseRetryAfter(uploadResp.headers.get('retry-after')), 'upload');
+      markGeminiRateLimited(parseRetryAfter(uploadResp.headers.get('retry-after')), 'upload', UPLOAD_SCOPE);
     }
     throw new Error(`Gemini upload failed: HTTP ${uploadResp.status} ${await uploadResp.text()}`);
   }
@@ -504,7 +517,7 @@ ${numbered}
 `;
 
   try {
-    await awaitGeminiSlot();
+    await awaitGeminiSlot(model);
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     const resp = await fetchWithTimeout(
       url,
@@ -521,7 +534,7 @@ ${numbered}
 
     if (!resp.ok) {
       if (resp.status === 429) {
-        markGeminiRateLimited(parseRetryAfter(resp.headers.get('retry-after')), 'taxonomy');
+        markGeminiRateLimited(parseRetryAfter(resp.headers.get('retry-after')), 'taxonomy', model);
       }
       return { success: false, error: `Gemini taxonomy gen failed: HTTP ${resp.status} ${await resp.text()}` };
     }
@@ -572,6 +585,11 @@ async function categorizeRecording(audioUrl, { callCategories = [], bugCategorie
   const apiKey = process.env.GEMINI_API_KEY;
   const model  = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
   const maxOutputTokens = Math.max(1024, Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 8192);
+  // Fallback model — used only when the primary returns 429 on this request.
+  // Set to empty string in env to disable the fallback entirely.
+  const fallbackEnv    = process.env.GEMINI_FALLBACK_MODEL;
+  const fallbackModel  = (fallbackEnv === undefined ? 'gemini-2.5-flash-lite' : fallbackEnv).trim();
+  const fallbackEnabled = !!fallbackModel && fallbackModel !== model;
 
   if (!apiKey) return { success: false, error: 'GEMINI_API_KEY not set' };
 
@@ -735,7 +753,7 @@ OUTPUT FORMAT (must match exactly):
 }
 `;
 
-      const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const buildGenUrl = m => `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
       const payload = {
         contents: [{
           parts: [
@@ -745,16 +763,47 @@ OUTPUT FORMAT (must match exactly):
         }],
         generationConfig: { response_mime_type: 'application/json', maxOutputTokens },
       };
+      const payloadBody = JSON.stringify(payload);
 
       logger.debug('Gemini running analysis');
-      // Hold for the rate-limit gate before generateContent. If a sibling
-      // worker just got 429'd, every other worker waits here too.
-      await awaitGeminiSlot();
-      const genResp = await fetchWithTimeout(
-        generateUrl,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+      // Try primary model first. The slot wait covers both the global
+      // min-interval AND any active per-model cooldown — so if primary is
+      // already cooling down from a sibling worker's 429, we'll wait here.
+      // To skip waiting we fall back to a sibling model; that path lives in
+      // the 429 branch below.
+      await awaitGeminiSlot(model);
+      let genResp = await fetchWithTimeout(
+        buildGenUrl(model),
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payloadBody },
         300_000
       );
+      let modelUsed = model;
+      let usedFallback = false;
+
+      // 429 fallback. Only one redirect — if the fallback also 429s we let the
+      // worker retry through normal backoff. Skip fallback if it's disabled,
+      // identical to the primary, or itself currently rate-limited.
+      if (genResp.status === 429 && fallbackEnabled) {
+        markGeminiRateLimited(parseRetryAfter(genResp.headers.get('retry-after')), 'generate-primary', model);
+        const fallbackCooling = getCooldown(fallbackModel) > Date.now();
+        if (!fallbackCooling) {
+          logger.warn('Gemini primary rate-limited, falling back', { primary: model, fallback: fallbackModel });
+          // Drain the 429 response so the connection releases.
+          try { await genResp.text(); } catch { /* ignore */ }
+          await awaitGeminiSlot(fallbackModel);
+          genResp = await fetchWithTimeout(
+            buildGenUrl(fallbackModel),
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payloadBody },
+            300_000
+          );
+          modelUsed = fallbackModel;
+          usedFallback = true;
+        } else {
+          logger.warn('Gemini primary rate-limited but fallback also cooling — failing for retry', {
+            primary: model, fallback: fallbackModel,
+          });
+        }
+      }
 
       // Async cleanup — fire and forget
       if (fileName) {
@@ -767,11 +816,11 @@ OUTPUT FORMAT (must match exactly):
 
       if (!genResp.ok) {
         if (genResp.status === 429) {
-          markGeminiRateLimited(parseRetryAfter(genResp.headers.get('retry-after')), 'generate');
+          markGeminiRateLimited(parseRetryAfter(genResp.headers.get('retry-after')), 'generate', modelUsed);
         }
         const errText = await genResp.text();
         if (attempt < maxRetries - 1) continue;
-        return { success: false, error: `Gemini generate failed: HTTP ${genResp.status} ${errText}` };
+        return { success: false, error: `Gemini generate failed (model=${modelUsed}): HTTP ${genResp.status} ${errText}` };
       }
 
       const resultData = await genResp.json();
@@ -832,7 +881,7 @@ OUTPUT FORMAT (must match exactly):
       analysis.call_category     = validCategory;
       analysis.call_sub_category = validSubCategory;
 
-      logger.info('Gemini analysis complete', { totalSec: ((Date.now() - startTime) / 1000).toFixed(1), analysisSec: ((Date.now() - genStart) / 1000).toFixed(1) });
+      logger.info('Gemini analysis complete', { totalSec: ((Date.now() - startTime) / 1000).toFixed(1), analysisSec: ((Date.now() - genStart) / 1000).toFixed(1), model: modelUsed, fallback: usedFallback });
 
       return {
         success:           true,
@@ -852,6 +901,8 @@ OUTPUT FORMAT (must match exactly):
         },
         transcription:     analysis.transcription || '',
         language:          toLanguageArray(analysis.language),
+        model_used:        modelUsed,
+        used_fallback:     usedFallback,
       };
 
     } catch (err) {
