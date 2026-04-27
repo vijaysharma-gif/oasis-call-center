@@ -161,6 +161,7 @@ function buildCallsPipeline(filter) {
             $project: {
               _id: 0,
               call_category: 1,
+              call_sub_category: 1,
               ai_insight: 1,
               summary: 1,
               bug_category: 1,
@@ -232,7 +233,11 @@ function callsToCsvRecord(doc) {
     'Duration (s)': doc.duration || 0,
     'Agent Duration (s)': doc.agent_duration || 0,
     'Call Category': a.call_category || '',
-    'Sub-Category': a.ai_insight || '',
+    // Prefer the structured call_sub_category from the dynamic taxonomy.
+    // Old records (analyzed before v3.4) only have ai_insight — fall back so
+    // historical exports remain populated until those records are re-analyzed.
+    'Sub-Category': a.call_sub_category && a.call_sub_category !== '-' ? a.call_sub_category : (a.ai_insight || ''),
+    'AI Insight': a.ai_insight || '',
     'Summary': normalizeMultiline(a.summary),
     'Bug Category': a.bug_category || '',
     'Bug Description': a.bugs || '',
@@ -330,7 +335,8 @@ function analysisToCsvRecord(doc) {
   return {
     'Call ID':         doc.call_id || '',
     'Call Category':   doc.call_category || '',
-    'Sub-Category':    doc.ai_insight || '',
+    'Sub-Category':    doc.call_sub_category && doc.call_sub_category !== '-' ? doc.call_sub_category : (doc.ai_insight || ''),
+    'AI Insight':      doc.ai_insight || '',
     'Gemini Category': doc.category || '',
     'Gemini Sub-Cat':  doc.sub_category || '',
     'Summary':         normalizeMultiline(doc.summary),
@@ -367,7 +373,7 @@ const EXPORT_TYPES = {
     headers: [
       'Call ID', 'Caller Number', 'Called Number', 'Agent Name', 'Agent Number', 'Status',
       'Call Start Time', 'Answer Time', 'Call End Time', 'Duration (s)', 'Agent Duration (s)',
-      'Call Category', 'Sub-Category', 'Summary', 'Bug Category', 'Bug Description',
+      'Call Category', 'Sub-Category', 'AI Insight', 'Summary', 'Bug Category', 'Bug Description',
       'Call Resolved', 'Agent Score', 'Audio Rating', 'Language', 'Recording URL',
       'Transcription', 'Created At',
     ],
@@ -379,7 +385,7 @@ const EXPORT_TYPES = {
   analysis: {
     collection: 'call_analysis',
     headers: [
-      'Call ID', 'Call Category', 'Sub-Category', 'Gemini Category', 'Gemini Sub-Cat',
+      'Call ID', 'Call Category', 'Sub-Category', 'AI Insight', 'Gemini Category', 'Gemini Sub-Cat',
       'Summary', 'Bug Category', 'Bug Description', 'Call Resolved', 'Agent Score',
       'Audio Rating', 'Audio Issues', 'Language', 'Caller', 'Agent Number',
       'Duration (s)', 'Recording', 'Date', 'Transcription',

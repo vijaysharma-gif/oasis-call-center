@@ -239,6 +239,51 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 300_000) {
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
+// ─── Gemini rate-limit gate (module-level, shared across concurrent jobs) ────
+// Two safeguards:
+//   1. Minimum spacing between any two outgoing Gemini calls. With concurrency
+//      = 5 and ~30s/call, we'd naturally do ~10 RPM, but bursts on cache-warm
+//      or queue-drain can spike. The gate caps peak RPM regardless.
+//   2. Global pause when Gemini returns 429. We honor `Retry-After` (seconds
+//      or HTTP date), and every concurrent worker waits at the same gate, so
+//      one rate-limit hit doesn't immediately get re-tripped by 4 siblings.
+const GEMINI_MIN_INTERVAL_MS = Math.max(0, Number(process.env.GEMINI_MIN_INTERVAL_MS) || 200);
+let _nextSlotAt = 0;          // earliest time the next request may fire
+let _rateLimitedUntil = 0;    // global cooldown deadline from a 429
+
+async function awaitGeminiSlot() {
+  // Serialize the slot computation in a tight burst — JS single-threaded so
+  // updating _nextSlotAt synchronously per call is enough.
+  const now = Date.now();
+  const slot = Math.max(now, _nextSlotAt, _rateLimitedUntil);
+  _nextSlotAt = slot + GEMINI_MIN_INTERVAL_MS;
+  const waitMs = slot - now;
+  if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+}
+
+// Parse the `Retry-After` header. Per RFC 7231 it's either a non-negative int
+// (seconds) or an HTTP-date. Fall back to a sensible 30s if unparseable.
+function parseRetryAfter(headerValue) {
+  if (!headerValue) return 30;
+  const asInt = Number(headerValue);
+  if (Number.isFinite(asInt) && asInt >= 0) return Math.min(asInt, 600);
+  const asDate = Date.parse(headerValue);
+  if (Number.isFinite(asDate)) {
+    const sec = Math.ceil((asDate - Date.now()) / 1000);
+    return Math.max(1, Math.min(sec, 600));
+  }
+  return 30;
+}
+
+// Mark a global cooldown so all in-flight workers pause at the gate together.
+function markGeminiRateLimited(retryAfterSec, source) {
+  const until = Date.now() + retryAfterSec * 1000;
+  if (until > _rateLimitedUntil) {
+    _rateLimitedUntil = until;
+    logger.warn('Gemini rate limit hit — pausing all workers', { retryAfterSec, source });
+  }
+}
+
 function cleanCategory(text) {
   if (!text) return text;
   return text
@@ -275,6 +320,25 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
   const contentLength = audioResp.headers.get('content-length');
   const mimeType      = audioResp.headers.get('content-type') || 'audio/x-wav';
 
+  // Reject oversized files BEFORE starting the upload — saves our bandwidth,
+  // Gemini upload quota, and the long timeout we'd otherwise burn waiting.
+  // Marked permanent: retrying won't change the file size; admin can purge.
+  // Only enforced when Content-Length is reported (not chunked transfers).
+  const maxBytes = Math.max(1024 * 1024, Number(process.env.GEMINI_MAX_AUDIO_BYTES) || 100 * 1024 * 1024);
+  if (contentLength) {
+    const size = Number(contentLength);
+    if (Number.isFinite(size) && size > maxBytes) {
+      // Drain & abort the body so the connection is released cleanly.
+      try { audioResp.body?.cancel?.(); } catch { /* ignore */ }
+      const err = new Error(`Audio too large: ${size} bytes (limit ${maxBytes})`);
+      err.permanent = true;
+      throw err;
+    }
+  }
+
+  // Hold for the rate-limit gate before initiating the upload session.
+  await awaitGeminiSlot();
+
   // ── Step A: Initiate resumable upload session ─────────────────────────────
   const initResp = await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}&uploadType=resumable`,
@@ -293,7 +357,10 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
   );
 
   if (!initResp.ok) {
-    throw new Error(`Gemini upload init failed: ${await initResp.text()}`);
+    if (initResp.status === 429) {
+      markGeminiRateLimited(parseRetryAfter(initResp.headers.get('retry-after')), 'upload-init');
+    }
+    throw new Error(`Gemini upload init failed: HTTP ${initResp.status} ${await initResp.text()}`);
   }
 
   const uploadUrl = initResp.headers.get('x-goog-upload-url');
@@ -316,7 +383,10 @@ async function uploadAudioToGemini(audioUrl, apiKey) {
   );
 
   if (!uploadResp.ok) {
-    throw new Error(`Gemini upload failed: ${await uploadResp.text()}`);
+    if (uploadResp.status === 429) {
+      markGeminiRateLimited(parseRetryAfter(uploadResp.headers.get('retry-after')), 'upload');
+    }
+    throw new Error(`Gemini upload failed: HTTP ${uploadResp.status} ${await uploadResp.text()}`);
   }
 
   const upData  = await uploadResp.json();
@@ -351,6 +421,151 @@ function detectTranscriptionLoop(text, opts = {}) {
     counts.set(line, n);
   }
   return false;
+}
+
+// ─── Taxonomy generation (meta-prompt) ──────────────────────────────────────
+// Takes a corpus of past call summaries and asks Gemini to derive a
+// hierarchical category/sub-category taxonomy that ALL future calls will be
+// classified against. The prompt enforces a "well-defined" rubric so the
+// output is mutually exclusive, collectively exhaustive, specific (no
+// "Other"/"Misc"), consistently named, and grounded in the actual data.
+async function generateCategoryTaxonomy(summaries, opts = {}) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model  = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  if (!apiKey) return { success: false, error: 'GEMINI_API_KEY not set' };
+
+  const cleanSummaries = (Array.isArray(summaries) ? summaries : [])
+    .map(s => (typeof s === 'string' ? s.trim() : ''))
+    .filter(s => s.length > 0);
+
+  if (cleanSummaries.length === 0) {
+    return { success: false, error: 'No summaries provided' };
+  }
+
+  const targetCount     = Math.max(4, Math.min(30, Number(opts.targetCount) || 12));
+  const minSubsPerCat   = Math.max(2, Number(opts.minSubsPerCat) || 4);
+  const maxSubsPerCat   = Math.max(minSubsPerCat, Number(opts.maxSubsPerCat) || 10);
+  const maxOutputTokens = Math.max(1024, Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 8192);
+
+  // Number the summaries so model errors / debugging can refer back to them.
+  const numbered = cleanSummaries.map((s, i) => `${i + 1}. ${s}`).join('\n');
+
+  const prompt = `
+You are designing a categorization taxonomy for a customer support helpline.
+The summaries below are real past calls. Use them — and ONLY them — to derive
+a hierarchical taxonomy that will be applied to EVERY future call.
+
+The taxonomy must be WELL-DEFINED. Hard requirements:
+
+1) MUTUALLY EXCLUSIVE
+   - No two top-level categories overlap in meaning.
+   - Within a category, no two sub-categories overlap.
+   - Every future call must fit exactly one (category, sub_category) pair.
+
+2) COLLECTIVELY EXHAUSTIVE for the calls in scope
+   - Every recurring issue type in the summaries must map to some
+     sub-category. Do NOT silently drop a real cluster.
+   - Do NOT lump unrelated issues together just to hit a count target.
+
+3) SPECIFIC, NEVER VAGUE
+   - Forbidden names: "Other", "Misc", "Miscellaneous", "General",
+     "General Query", "General Issues", "Issues", "Problems", "Help",
+     "Support", "Query", "Concern", "Doubt", anything ending in "etc".
+   - A name must telegraph exactly which calls belong there. A new reader
+     should be able to predict, from the name alone, what goes in the bucket.
+
+4) CONSISTENT, READABLE NAMING
+   - Title Case. No emoji, no abbreviations a new agent wouldn't recognize.
+   - Same grammatical pattern across siblings (all noun phrases, or all
+     "X Not Y" forms, etc.). Mix-and-match is not allowed.
+   - Short — under 60 characters per name.
+
+5) RIGHT GRANULARITY
+   - Top-level categories: broad themes. Aim for ~${targetCount} (between
+     ${Math.max(4, targetCount - 3)} and ${targetCount + 3}).
+   - Each category has ${minSubsPerCat}–${maxSubsPerCat} sub-categories.
+   - Sub-categories are concrete issues, not paraphrases of the parent.
+   - A sub-category belongs to exactly ONE parent; never duplicated.
+
+6) EVIDENCE-BASED
+   - Every category and sub-category must trace back to at least 3
+     summaries below. If a cluster has fewer, fold it into a sibling
+     whose theme it shares — do NOT invent a category for one-off calls.
+
+Return JSON ONLY, no markdown fence, no commentary:
+{
+  "categories": [
+    { "name": "<Top-level Category>", "sub_categories": ["<Sub 1>", "<Sub 2>"] }
+  ]
+}
+
+CALL SUMMARIES (n=${cleanSummaries.length}):
+${numbered}
+`;
+
+  try {
+    await awaitGeminiSlot();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const resp = await fetchWithTimeout(
+      url,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { response_mime_type: 'application/json', maxOutputTokens },
+        }),
+      },
+      300_000
+    );
+
+    if (!resp.ok) {
+      if (resp.status === 429) {
+        markGeminiRateLimited(parseRetryAfter(resp.headers.get('retry-after')), 'taxonomy');
+      }
+      return { success: false, error: `Gemini taxonomy gen failed: HTTP ${resp.status} ${await resp.text()}` };
+    }
+
+    const data = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch { return { success: false, error: 'Invalid JSON returned from Gemini taxonomy gen' }; }
+
+    const cats = Array.isArray(parsed?.categories) ? parsed.categories : [];
+    // Normalize + validate. Drop empty/duplicate names; trim everything.
+    const seenCat = new Set();
+    const normalized = [];
+    for (const c of cats) {
+      const name = (typeof c?.name === 'string' ? c.name : '').trim();
+      if (!name || seenCat.has(name.toLowerCase())) continue;
+      const subsRaw = Array.isArray(c?.sub_categories) ? c.sub_categories : [];
+      const seenSub = new Set();
+      const subs = [];
+      for (const s of subsRaw) {
+        const sn = (typeof s === 'string' ? s : '').trim();
+        if (!sn || seenSub.has(sn.toLowerCase())) continue;
+        seenSub.add(sn.toLowerCase());
+        subs.push(sn);
+      }
+      if (subs.length === 0) continue; // empty parents are useless
+      seenCat.add(name.toLowerCase());
+      normalized.push({ name, sub_categories: subs });
+    }
+
+    if (normalized.length === 0) {
+      return { success: false, error: 'Gemini returned no usable categories', raw: text.slice(0, 1000) };
+    }
+
+    return {
+      success:        true,
+      categories:     normalized,
+      summaries_used: cleanSummaries.length,
+      gemini_model:   model,
+    };
+  } catch (err) {
+    return { success: false, error: err.message || 'Unexpected taxonomy gen error' };
+  }
 }
 
 async function categorizeRecording(audioUrl, { callCategories = [], bugCategories = [] } = {}, maxRetries = 3) {
@@ -485,9 +700,13 @@ TASKS:
 9) Language detection:
    - List all languages spoken (e.g., ["Hindi", "English"]).
 
-10) Call Category:
-   - Based on the ai_insight you generated, assign a call_category from this list: ${JSON.stringify(callCategories)}
-   - If the ai_insight does NOT fit any of the above categories, set call_category to "Uncategorised".
+10) Call Category & Sub-Category:
+   - Use the hierarchical taxonomy below. Each entry is { "name": "<top-level>", "sub_categories": [...] }.
+   - Pick a call_category whose name best fits the ai_insight.
+   - Then pick a call_sub_category from THAT category's sub_categories list — never from a different category's sub-list.
+   - If no top-level fits: call_category = "Uncategorised", call_sub_category = "-".
+   - If a top-level fits but no sub matches: call_sub_category = "Other".
+   TAXONOMY: ${JSON.stringify(callCategories)}
 
 11) Bug Category:
    - If bugs is not "-" (i.e., a real bug was found), assign a bug_category from this list: ${JSON.stringify(bugCategories)}
@@ -505,6 +724,7 @@ OUTPUT FORMAT (must match exactly):
   "ai_insight": "",
   "bugs": "",
   "call_category": "",
+  "call_sub_category": "",
   "bug_category": "",
   "agent_score": null,
   "call_resolved": "",
@@ -527,6 +747,9 @@ OUTPUT FORMAT (must match exactly):
       };
 
       logger.debug('Gemini running analysis');
+      // Hold for the rate-limit gate before generateContent. If a sibling
+      // worker just got 429'd, every other worker waits here too.
+      await awaitGeminiSlot();
       const genResp = await fetchWithTimeout(
         generateUrl,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
@@ -543,9 +766,12 @@ OUTPUT FORMAT (must match exactly):
       }
 
       if (!genResp.ok) {
+        if (genResp.status === 429) {
+          markGeminiRateLimited(parseRetryAfter(genResp.headers.get('retry-after')), 'generate');
+        }
         const errText = await genResp.text();
         if (attempt < maxRetries - 1) continue;
-        return { success: false, error: `Gemini generate failed: ${errText}` };
+        return { success: false, error: `Gemini generate failed: HTTP ${genResp.status} ${errText}` };
       }
 
       const resultData = await genResp.json();
@@ -577,25 +803,55 @@ OUTPUT FORMAT (must match exactly):
         return { success: false, permanent: true, error: 'transcription_loop_detected' };
       }
 
+      // Validate (call_category, call_sub_category) against the live taxonomy.
+      // Gemini occasionally hallucinates a category not in the list, or pairs
+      // a sub-category with the wrong parent. Snap to safe defaults so the DB
+      // never holds inconsistent pairs.
+      const taxonomyMap = new Map();
+      for (const c of (callCategories || [])) {
+        if (c?.name) taxonomyMap.set(c.name, new Set(Array.isArray(c.sub_categories) ? c.sub_categories : []));
+      }
+      let validCategory    = analysis.call_category    || 'Uncategorised';
+      let validSubCategory = analysis.call_sub_category || '-';
+      // Preserve "Uncategorised" as-is. For everything else, the parent must exist.
+      if (validCategory !== 'Uncategorised' && taxonomyMap.size > 0 && !taxonomyMap.has(validCategory)) {
+        logger.warn('Gemini returned unknown call_category — snapping', { returned: validCategory });
+        validCategory    = 'Uncategorised';
+        validSubCategory = '-';
+      }
+      // Sub-category must belong to the chosen parent (or be the wildcards "-"/"Other").
+      if (validCategory !== 'Uncategorised' && validSubCategory !== '-' && validSubCategory !== 'Other') {
+        const allowed = taxonomyMap.get(validCategory);
+        if (allowed && allowed.size > 0 && !allowed.has(validSubCategory)) {
+          logger.warn('Gemini returned sub-category outside parent — snapping to "Other"', {
+            parent: validCategory, returned: validSubCategory,
+          });
+          validSubCategory = 'Other';
+        }
+      }
+      analysis.call_category     = validCategory;
+      analysis.call_sub_category = validSubCategory;
+
       logger.info('Gemini analysis complete', { totalSec: ((Date.now() - startTime) / 1000).toFixed(1), analysisSec: ((Date.now() - genStart) / 1000).toFixed(1) });
 
       return {
-        success:       true,
-        category:      cleanCategory(analysis.category)      || 'Uncategorized',
-        sub_category:  cleanCategory(analysis.sub_category)  || 'N/A',
-        summary:       analysis.summary       || '',
-        ai_insight:    analysis.ai_insight    || '',
-        bugs:          analysis.bugs          || '-',
-        call_category: analysis.call_category || 'Uncategorised',
-        bug_category:  analysis.bug_category  || '-',
-        agent_score:   typeof analysis.agent_score === 'number' ? analysis.agent_score : null,
-        call_resolved: analysis.call_resolved || 'No',
+        success:           true,
+        category:          cleanCategory(analysis.category)      || 'Uncategorized',
+        sub_category:      cleanCategory(analysis.sub_category)  || 'N/A',
+        summary:           analysis.summary       || '',
+        ai_insight:        analysis.ai_insight    || '',
+        bugs:              analysis.bugs          || '-',
+        call_category:     analysis.call_category || 'Uncategorised',
+        call_sub_category: analysis.call_sub_category || '-',
+        bug_category:      analysis.bug_category  || '-',
+        agent_score:       typeof analysis.agent_score === 'number' ? analysis.agent_score : null,
+        call_resolved:     analysis.call_resolved || 'No',
         audio_quality: {
           rating: analysis.audio_quality?.rating || 'Moderate',
           issues: analysis.audio_quality?.issues || '-',
         },
-        transcription: analysis.transcription || '',
-        language:      toLanguageArray(analysis.language),
+        transcription:     analysis.transcription || '',
+        language:          toLanguageArray(analysis.language),
       };
 
     } catch (err) {
@@ -627,4 +883,4 @@ OUTPUT FORMAT (must match exactly):
   return { success: false, error: 'Max retries exceeded' };
 }
 
-module.exports = { categorizeRecording, CATEGORIZATION_SCHEMA, detectTranscriptionLoop };
+module.exports = { categorizeRecording, CATEGORIZATION_SCHEMA, detectTranscriptionLoop, generateCategoryTaxonomy };

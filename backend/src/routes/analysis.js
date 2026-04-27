@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const { getDb } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { createExportJob, getExportJob } = require('../workers/exportWorker');
-const { detectTranscriptionLoop } = require('../services/geminiService');
+const { detectTranscriptionLoop, generateCategoryTaxonomy } = require('../services/geminiService');
 
 const router = express.Router();
 
@@ -507,6 +507,145 @@ router.post('/reset-loops', requireAdmin, async (req, res) => {
     skipped: toReset.length - result.modifiedCount,
     sample_call_ids: toReset.slice(0, 20).map(d => d.call_id),
     message: `Reset ${result.modifiedCount} record(s) with looping transcriptions to pending; the worker will re-analyse them on its next tick.`,
+  });
+});
+
+// POST /api/analysis/generate-categories — admin-only: feed past call summaries
+// to Gemini and ask it to derive a hierarchical { category, sub_categories[] }
+// taxonomy. By default returns the proposal without writing (dry_run). Pass
+// dry_run=false (or commit=true) to snapshot the existing call_categories
+// collection into call_categories_history, then replace it with the new
+// taxonomy. The analysis worker reads call_categories on every job, so the
+// next analysis tick after a successful write uses the new taxonomy.
+//
+// Body (all optional):
+//   since:             ISO date  earliest created_at to include (default: any)
+//   until:             ISO date  latest created_at to include (default: now)
+//   max_summaries:     number    cap on summaries fed to Gemini (default 2000,
+//                                 max 10000). More = better clustering, more cost.
+//   target_count:      number    desired top-level category count (default 12)
+//   min_subs_per_cat:  number    sub-category minimum per category (default 4)
+//   max_subs_per_cat:  number    sub-category maximum per category (default 10)
+//   dry_run:           boolean   if true, return proposal only (default true)
+//   commit:            boolean   alias for dry_run=false (explicit intent)
+//   reason:            string    audit note stored on the history record
+router.post('/generate-categories', requireAdmin, async (req, res) => {
+  const db = await getDb();
+  const body = req.body || {};
+  const dryRun = body.commit === true ? false : (body.dry_run !== false);
+
+  const rawMax = Number(body.max_summaries);
+  const maxSummaries = Math.min(
+    Math.max(Number.isFinite(rawMax) ? rawMax : 2000, 50),
+    10_000
+  );
+  const targetCount   = Math.max(4, Math.min(30, Number(body.target_count)    || 12));
+  const minSubsPerCat = Math.max(2,                 Number(body.min_subs_per_cat) || 4);
+  const maxSubsPerCat = Math.max(minSubsPerCat,     Number(body.max_subs_per_cat) || 10);
+
+  // Build the summary-source filter. We only want completed, real analyses
+  // — skip "Audio Unclear" / "Call too Short" since their summaries are
+  // boilerplate, not useful for clustering.
+  const summaryFilter = {
+    status: 'completed',
+    summary: { $exists: true, $type: 'string', $nin: ['', '-'] },
+    category: { $nin: ['Audio Unclear', 'Call too Short'] },
+  };
+  const dateRange = {};
+  if (body.since) { const d = new Date(body.since); if (!Number.isNaN(d.getTime())) dateRange.$gte = d; }
+  if (body.until) { const d = new Date(body.until); if (!Number.isNaN(d.getTime())) dateRange.$lte = d; }
+  if (Object.keys(dateRange).length > 0) summaryFilter.created_at = dateRange;
+
+  // Pull most-recent first; truncate each to a sane length so one runaway
+  // doesn't dominate the prompt token budget.
+  const SUMMARY_TRUNC = 500;
+  const docs = await db.collection('call_analysis')
+    .find(summaryFilter, { projection: { _id: 0, summary: 1 } })
+    .sort({ created_at: -1 })
+    .limit(maxSummaries)
+    .toArray();
+
+  // Dedupe near-identical summaries by their first 80 chars — Gemini repeats
+  // weaken the signal and waste input tokens.
+  const seen = new Set();
+  const summaries = [];
+  for (const d of docs) {
+    const s = String(d.summary || '').trim().slice(0, SUMMARY_TRUNC);
+    if (!s) continue;
+    const key = s.slice(0, 80).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    summaries.push(s);
+  }
+
+  if (summaries.length < 20) {
+    return res.status(400).json({
+      ok: false,
+      error: `Not enough completed-analysis summaries to derive a meaningful taxonomy (found ${summaries.length}, need >=20). Widen the date range or wait for more analyses to complete.`,
+    });
+  }
+
+  const result = await generateCategoryTaxonomy(summaries, {
+    targetCount, minSubsPerCat, maxSubsPerCat,
+  });
+  if (!result.success) {
+    return res.status(502).json({ ok: false, error: result.error || 'Gemini taxonomy generation failed' });
+  }
+
+  const audit = {
+    generated_at: new Date(),
+    generated_by: req.user?.name || req.user?.role || 'admin',
+    reason:       typeof body.reason === 'string' ? body.reason.trim().slice(0, 200) : null,
+    gemini_model: result.gemini_model,
+    summaries_used: result.summaries_used,
+  };
+
+  if (dryRun) {
+    return res.json({
+      ok: true,
+      dry_run: true,
+      summaries_used: result.summaries_used,
+      categories: result.categories,
+      written: null,
+      audit,
+      message: `Dry run: would replace call_categories with ${result.categories.length} categories. Re-send with commit=true to apply.`,
+    });
+  }
+
+  // Commit path: snapshot existing call_categories, then replace.
+  // Brief gap between deleteMany + insertMany during which the worker would
+  // see an empty taxonomy. With concurrency=5 and tick-rate 5s, the chance
+  // of a tick landing in that ~10ms window is tiny — and even if it does,
+  // the worker just returns "Uncategorised" / "-" for that one call, which
+  // self-heals on the next /reset-loops or recategorization run.
+  const existing = await db.collection('call_categories').find({}, { projection: { _id: 0 } }).toArray();
+  await db.collection('call_categories_history').insertOne({
+    ...audit,
+    previous_categories: existing,
+    new_categories:      result.categories,
+  });
+
+  await db.collection('call_categories').deleteMany({});
+  const newDocs = result.categories.map(c => ({
+    name:           c.name,
+    sub_categories: c.sub_categories,
+    source:         'gemini-generated',
+    generated_at:   audit.generated_at,
+    generated_by:   audit.generated_by,
+    gemini_model:   audit.gemini_model,
+  }));
+  if (newDocs.length > 0) {
+    await db.collection('call_categories').insertMany(newDocs);
+  }
+
+  res.json({
+    ok: true,
+    dry_run: false,
+    summaries_used: result.summaries_used,
+    categories: result.categories,
+    written: { call_categories: newDocs.length, replaced: existing.length },
+    audit,
+    message: `Replaced call_categories: ${existing.length} → ${newDocs.length}. The next analysis tick uses the new taxonomy.`,
   });
 });
 

@@ -12,7 +12,7 @@ const { getDb }               = require('../db');
 const { categorizeRecording } = require('../services/geminiService');
 const logger                  = require('../logger');
 
-const MAX_CONCURRENCY  = Math.max(1, Number(process.env.ANALYSIS_CONCURRENCY || 4));
+const MAX_CONCURRENCY  = Math.max(1, Number(process.env.ANALYSIS_CONCURRENCY || 5));
 const POLL_INTERVAL_MS = Math.max(1000, Number(process.env.ANALYSIS_POLL_SEC || 5) * 1000);
 const STALE_LOCK_MIN   = 15;
 const MAX_ATTEMPTS     = 5;  // total attempts including first
@@ -48,6 +48,10 @@ async function resetStaleLocks(db) {
 // MongoDB guarantees findOneAndUpdate is atomic per document, so even across
 // multiple workers/containers the same record can never be claimed twice.
 // We also record `processing_id` so we can detect stolen locks on writeback.
+//
+// Sort order is `created_at: -1` — newest first (LIFO). Recent calls reach
+// agents/dashboards faster; older backlog drains in the gaps. If you need
+// strict FIFO for a backfill, run a one-off script with explicit sort.
 async function claimNext(db) {
   const now = new Date();
   const processingId = now.getTime().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -62,7 +66,7 @@ async function claimNext(db) {
       ],
     },
     { $set: { status: 'processing', processing_id: processingId, updated_at: now } },
-    { sort: { created_at: 1 }, returnDocument: 'after' }
+    { sort: { created_at: -1 }, returnDocument: 'after' }
   );
   return result;
 }
@@ -117,7 +121,13 @@ async function processRecord(db, record) {
       db.collection('call_categories').find({}).toArray(),
       db.collection('bug_categories').find({}).toArray(),
     ]);
-    const callCategories = callCatDocs.map(c => c.name);
+    // call_categories may be flat (legacy: { name }) or hierarchical
+    // ({ name, sub_categories: [...] } from generate-categories endpoint).
+    // Pass hierarchical shape always; legacy docs surface as { name, sub_categories: [] }.
+    const callCategories = callCatDocs.map(c => ({
+      name: c.name,
+      sub_categories: Array.isArray(c.sub_categories) ? c.sub_categories : [],
+    }));
     const bugCategories = bugCatDocs.map(c => c.name);
 
     const result = await categorizeRecording(recording_url, { callCategories, bugCategories });
@@ -146,25 +156,26 @@ async function processRecord(db, record) {
         ownedFilter,
         {
           $set: {
-            status:        'completed',
-            category:      result.category,
-            sub_category:  result.sub_category,
-            summary:       result.summary,
-            ai_insight:    result.ai_insight,
-            bugs:          result.bugs,
-            call_category: result.call_category,
-            bug_category:  result.bug_category,
-            agent_score:   result.agent_score,
-            call_resolved: result.call_resolved,
-            audio_quality: result.audio_quality,
-            transcription: result.transcription,
-            language:      result.language,
-            error:         null,
-            last_error:    null,
-            next_attempt_at: null,
-            processing_id: null,
-            processed_at:  new Date(),
-            updated_at:    new Date(),
+            status:            'completed',
+            category:          result.category,
+            sub_category:      result.sub_category,
+            summary:           result.summary,
+            ai_insight:        result.ai_insight,
+            bugs:              result.bugs,
+            call_category:     result.call_category,
+            call_sub_category: result.call_sub_category || '-',
+            bug_category:      result.bug_category,
+            agent_score:       result.agent_score,
+            call_resolved:     result.call_resolved,
+            audio_quality:     result.audio_quality,
+            transcription:     result.transcription,
+            language:          result.language,
+            error:             null,
+            last_error:        null,
+            next_attempt_at:   null,
+            processing_id:     null,
+            processed_at:      new Date(),
+            updated_at:        new Date(),
           },
         }
       );
