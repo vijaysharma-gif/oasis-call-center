@@ -30,8 +30,12 @@ const router = express.Router();
 function extractCall(payload) {
   const p = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k.toLowerCase().replace(/\s+/g, ''), v]));
   const rawRecording = p.call_recording || p.callrecording || p.recording_url || p.recording || p.recurl || p.file_url || p.audio_url || '';
-  // Drop URLs that aren't a real audio file — they'd only fail Gemini analysis.
-  const call_recording = isValidRecordingUrl(rawRecording) ? String(rawRecording).trim() : '';
+  // Store whatever the IVR sent, trimmed — even URLs that look broken (truncated
+  // directory paths, missing extensions, etc.). Keeping them visible on the UI
+  // means an admin can still attempt playback or repair the URL by hand.
+  // The isValidRecordingUrl() gate still runs at enqueue time so we don't
+  // waste Gemini quota on URLs that obviously won't process.
+  const call_recording = String(rawRecording || '').trim();
   return {
     call_id:           p.call_id || p.callid || p.uid || p.id || `wb_${Date.now()}`,
     caller_number:     p.caller_number || p.callernumber || p.caller || '',

@@ -356,7 +356,7 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Status</th>
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Category</th>
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Sub-Category</th>
-              <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Recording</th>
+              <SortTh col="recording" label="Recording" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap"></th>
             </tr>
           </thead>

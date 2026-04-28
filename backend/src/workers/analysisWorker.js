@@ -149,7 +149,11 @@ async function processRecord(db, record) {
         { $set: { status: 'failed', error: result.error, updated_at: new Date() }, $inc: { attempts: 1 } }
       );
       if (wb.matchedCount === 0) { logger.warn('[Worker] Lock lost', { call_id }); return; }
-      await callsCol.updateOne({ call_id }, { $set: { call_recording: '' } });
+      // Note: call_recording is intentionally PRESERVED on permanent failure.
+      // Gemini's IP range may be blocked from S3 even when the URL is valid
+      // for browsers/admins on a whitelisted network — keeping the URL lets
+      // users still attempt playback. The status='failed' marker on
+      // call_analysis is the source of truth for "analysis didn't work".
       logger.warn('[Worker] Permanent failure — not retrying', { call_id, error: result.error });
     } else if (result.success) {
       const wb = await analysisCol.updateOne(

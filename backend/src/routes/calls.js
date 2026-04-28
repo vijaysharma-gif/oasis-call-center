@@ -144,15 +144,23 @@ router.get('/', async (req, res) => {
 
   const filter = conditions.length > 0 ? { $and: conditions } : {};
 
-  const CALL_SORT_FIELDS = { call_start_time: 'call_start_time', agent_answer_time: 'agent_answer_time', agent_duration: 'agent_duration', duration: 'duration', created_at: 'created_at' };
+  const CALL_SORT_FIELDS = { call_start_time: 'call_start_time', agent_answer_time: 'agent_answer_time', agent_duration: 'agent_duration', duration: 'duration', created_at: 'created_at', recording: 'call_recording' };
   const callSortField = CALL_SORT_FIELDS[sortBy] ?? 'created_at';
   const callSortOrder = sortDir === 'asc' ? 1 : -1;
+
+  // _hasVal pins "missing" rows to the bottom regardless of asc/desc. For most
+  // fields "has value" = non-null. For call_recording specifically, an empty
+  // string also counts as "missing" so calls with no recording group together
+  // at the bottom rather than alphabetically among real URLs.
+  const hasValExpr = callSortField === 'call_recording'
+    ? { $cond: [{ $and: [{ $ne: ['$call_recording', null] }, { $ne: ['$call_recording', ''] }] }, 1, 0] }
+    : { $cond: [{ $gt: [`$${callSortField}`, null] }, 1, 0] };
 
   // Use aggregation so nulls/missing values always sort last regardless of direction
   const [docs, total] = await Promise.all([
     db.collection('calls').aggregate([
       { $match: filter },
-      { $addFields: { _hasVal: { $cond: [{ $gt: [`$${callSortField}`, null] }, 1, 0] } } },
+      { $addFields: { _hasVal: hasValExpr } },
       { $sort: { _hasVal: -1, [callSortField]: callSortOrder, _id: -1 } },
       { $skip: Number(offset) },
       { $limit: Number(limit) },
