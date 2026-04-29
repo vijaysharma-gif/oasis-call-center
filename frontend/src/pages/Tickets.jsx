@@ -47,9 +47,10 @@ export default function Tickets() {
   const effectiveFrom  = dateFrom || minDate;
   const effectiveTo    = dateTo   || maxDate;
   const isDateFiltered = !!(dateFrom || dateTo);
+  const isFiltered     = !!(search || statusFilter || priorityFilter || categoryFilter || dateFrom || dateTo);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const params = new URLSearchParams({ limit: pageSize, offset: (page - 1) * pageSize });
       if (search)         params.append('search',   search);
@@ -64,10 +65,18 @@ export default function Tickets() {
       setTickets(data.tickets ?? []);
       setTotal(data.total ?? 0);
     } catch {}
-    finally { setLoading(false); }
+    finally { if (!silent) setLoading(false); }
   }, [token, page, pageSize, search, statusFilter, priorityFilter, categoryFilter, effectiveFrom, effectiveTo]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Auto-refresh every 5 seconds, only when tab is visible (silent — no spinner)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (!document.hidden) load(true);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [load]);
 
   return (
     <div className="p-4 sm:p-6 lg:p-8">
@@ -84,7 +93,7 @@ export default function Tickets() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Tickets</h1>
-          <p className="text-sm text-slate-500 dark:text-zinc-500 mt-0.5">{total} total tickets</p>
+          <p className="text-sm text-slate-500 dark:text-zinc-500 mt-0.5">{total} {isFiltered ? 'filtered' : 'total'} tickets · auto-refreshes every 5s</p>
         </div>
         <button onClick={load} title="Refresh" className="w-9 h-9 flex items-center justify-center rounded-lg border border-slate-300 dark:border-zinc-700 text-slate-600 dark:text-zinc-300 hover:bg-slate-100 dark:hover:bg-zinc-800 transition-colors self-start">
           <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">

@@ -185,7 +185,7 @@ export default function AIAnalysis() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">AI Analysis</h1>
-          <p className="text-sm text-slate-500 dark:text-zinc-500 mt-0.5">{total} analysed calls</p>
+          <p className="text-sm text-slate-500 dark:text-zinc-500 mt-0.5">{total} {isFiltered ? 'filtered' : 'analysed'} calls · auto-refreshes every 10s</p>
         </div>
         <div className="flex items-center gap-2 self-start">
           <button

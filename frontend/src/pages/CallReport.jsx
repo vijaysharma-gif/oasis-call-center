@@ -87,7 +87,7 @@ export default function CallReport() {
   // new webhook arrivals are never hidden by a stale upper-date ceiling.
   const effectiveFrom = dateFrom || minDate;
   const effectiveTo   = dateTo   || maxDate;
-  const isFiltered    = !!(dateFrom || dateTo);
+  const isFiltered    = !!(dateFrom || dateTo || search || status || agentNumber);
 
   const { calls, total, loading, error, refetch } = useCalls({ search, status, page, pageSize, token, dateFrom: effectiveFrom, dateTo: effectiveTo, agentNumber, sortBy, sortDir });
   function handleSearch(e) { setSearch(e.target.value); setPage(1); }
@@ -148,7 +148,7 @@ export default function CallReport() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Call Report</h1>
           <p className="text-sm text-slate-500 dark:text-zinc-500 mt-0.5">
-            {total} total records · auto-refreshes every 5s
+            {total} {isFiltered ? 'filtered' : 'total'} records · auto-refreshes every 5s
           </p>
         </div>
         <div className="flex gap-2 self-start">
