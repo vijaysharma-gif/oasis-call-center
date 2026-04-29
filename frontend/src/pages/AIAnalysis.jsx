@@ -501,7 +501,7 @@ const AnalysisRow = forwardRef(function AnalysisRow({ analysis, categories, call
         {formatDate(call?.call_start_time || analysis.created_at)}
       </td>}
       {cols.recording && <td className="px-4 py-3">
-        {call?.call_recording
+        {call?.call_recording && call?.agent_answer_time
           ? <AudioPlayer src={call.call_recording} />
           : <span className="text-slate-400 dark:text-zinc-500 text-xs">—</span>}
       </td>}

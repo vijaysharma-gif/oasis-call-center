@@ -325,7 +325,7 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
               {onCreateTicket && (
                 <TicketBtn onClick={e => { e.stopPropagation(); onCreateTicket(call); }} />
               )}
-              {call.call_recording ? (
+              {call.call_recording && call.agent_answer_time ? (
                 <>
                   <AudioPlayer src={call.call_recording} />
                   <TranscriptBtn onClick={() => setTranscriptCall(call)} />
@@ -439,7 +439,7 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                   <td className="px-3 py-2 text-slate-600 dark:text-zinc-300 text-xs whitespace-nowrap">{call.category || '—'}</td>
                   <td className="px-3 py-2 text-slate-600 dark:text-zinc-300 text-xs whitespace-nowrap">{call.sub_category || '—'}</td>
                   <td className="px-3 py-2 min-w-[200px]">
-                    {call.call_recording ? (
+                    {call.call_recording && call.agent_answer_time ? (
                       <AudioPlayer src={call.call_recording} />
                     ) : (
                       <span className="text-slate-300 dark:text-zinc-600 text-xs">—</span>

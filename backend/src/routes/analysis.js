@@ -700,7 +700,7 @@ router.get('/', async (req, res) => {
   const callIds  = docs.map(d => d.call_id);
   const callDocs = callIds.length
     ? await db.collection('calls').find({ call_id: { $in: callIds } },
-        { projection: { call_id:1, caller_number:1, called_number:1, agent_name:1, agent_number:1, call_start_time:1, duration:1, call_recording:1 } }
+        { projection: { call_id:1, caller_number:1, called_number:1, agent_name:1, agent_number:1, call_start_time:1, agent_answer_time:1, duration:1, call_recording:1 } }
       ).toArray()
     : [];
   const callMap = Object.fromEntries(callDocs.map(c => [c.call_id, c]));
