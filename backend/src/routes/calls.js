@@ -144,15 +144,19 @@ router.get('/', async (req, res) => {
 
   const filter = conditions.length > 0 ? { $and: conditions } : {};
 
-  const CALL_SORT_FIELDS = { call_start_time: 'call_start_time', agent_answer_time: 'agent_answer_time', agent_duration: 'agent_duration', duration: 'duration', created_at: 'created_at', recording: 'call_recording' };
+  // Sort whitelist. The 'recording' key sorts by `duration` (the closest proxy
+  // for audio length we have without HEADing every S3 object) but uses
+  // call_recording for the "has value" grouping — calls without a recording
+  // pin to the bottom regardless of duration.
+  const CALL_SORT_FIELDS = { call_start_time: 'call_start_time', agent_answer_time: 'agent_answer_time', agent_duration: 'agent_duration', duration: 'duration', created_at: 'created_at', recording: 'duration' };
   const callSortField = CALL_SORT_FIELDS[sortBy] ?? 'created_at';
   const callSortOrder = sortDir === 'asc' ? 1 : -1;
 
   // _hasVal pins "missing" rows to the bottom regardless of asc/desc. For most
-  // fields "has value" = non-null. For call_recording specifically, an empty
-  // string also counts as "missing" so calls with no recording group together
-  // at the bottom rather than alphabetically among real URLs.
-  const hasValExpr = callSortField === 'call_recording'
+  // fields "has value" = non-null. For the recording column specifically,
+  // "has value" requires call_recording to be a non-empty string — the
+  // numeric duration field can't tell us whether a recording exists.
+  const hasValExpr = sortBy === 'recording'
     ? { $cond: [{ $and: [{ $ne: ['$call_recording', null] }, { $ne: ['$call_recording', ''] }] }, 1, 0] }
     : { $cond: [{ $gt: [`$${callSortField}`, null] }, 1, 0] };
 

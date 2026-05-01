@@ -48,6 +48,7 @@ function extractCall(payload) {
     duration:          parseInt(p.duration || p.call_duration || 0) || 0,
     call_recording,
     agent_duration:    (() => { const v = parseInt(p.agent_duration || p.agentduration || 0) || 0; return v > 86400 ? 0 : v; })(),
+    keypress:          (p.keypress != null ? String(p.keypress).trim() : ''),
   };
 }
 

@@ -304,6 +304,12 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                   <p className="text-slate-700 dark:text-zinc-300">{formatDuration(call.agent_duration)}</p>
                 </div>
               )}
+              {call.keypress && (
+                <div>
+                  <p className="text-slate-400 dark:text-zinc-500">Keypress</p>
+                  <p className="text-slate-700 dark:text-zinc-300 tabular-nums">{call.keypress}</p>
+                </div>
+              )}
             </div>
 
             {/* Category / Sub-Category */}
@@ -354,6 +360,7 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Duration</th>
               <SortTh col="agent_duration" label="Agent Duration" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Status</th>
+              <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Keypress</th>
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Category</th>
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Sub-Category</th>
               <SortTh col="recording" label="Recording" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
@@ -436,6 +443,7 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                       <DialBtn call={call} />
                     </div>
                   </td>
+                  <td className="px-3 py-2 text-slate-700 dark:text-zinc-300 tabular-nums text-center">{call.keypress || '—'}</td>
                   <td className="px-3 py-2 text-slate-600 dark:text-zinc-300 text-xs whitespace-nowrap">{call.category || '—'}</td>
                   <td className="px-3 py-2 text-slate-600 dark:text-zinc-300 text-xs whitespace-nowrap">{call.sub_category || '—'}</td>
                   <td className="px-3 py-2 min-w-[200px]">

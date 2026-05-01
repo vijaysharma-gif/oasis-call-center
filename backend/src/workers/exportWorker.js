@@ -191,6 +191,7 @@ function buildCallsPipeline(filter) {
         duration: 1,
         agent_duration: 1,
         call_recording: 1,
+        keypress: 1,
         created_at: 1,
         analysis: { $first: '$analysis_doc' },
         enriched_agent_name: { $first: '$agent_doc.name' },
@@ -227,6 +228,7 @@ function callsToCsvRecord(doc) {
     'Agent Name': doc.enriched_agent_name || doc.agent_name || '',
     'Agent Number': doc.agent_number || '',
     'Status': doc.agent_answer_time ? 'Received' : 'Missed',
+    'Keypress': doc.keypress || '',
     'Call Start Time': formatDate(doc.call_start_time),
     'Answer Time': formatDate(doc.agent_answer_time),
     'Call End Time': formatDate(doc.call_end_time),
@@ -372,6 +374,7 @@ const EXPORT_TYPES = {
     collection: 'calls',
     headers: [
       'Call ID', 'Caller Number', 'Called Number', 'Agent Name', 'Agent Number', 'Status',
+      'Keypress',
       'Call Start Time', 'Answer Time', 'Call End Time', 'Duration (s)', 'Agent Duration (s)',
       'Call Category', 'Sub-Category', 'AI Insight', 'Summary', 'Bug Category', 'Bug Description',
       'Call Resolved', 'Agent Score', 'Audio Rating', 'Language', 'Recording URL',
