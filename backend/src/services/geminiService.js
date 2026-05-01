@@ -239,6 +239,29 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 300_000) {
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 
+// Strip markdown fences and any prose Gemini emits around JSON despite the
+// response_mime_type hint. Returns the candidate JSON substring; if no
+// braces/brackets are found, returns the trimmed input as-is so JSON.parse
+// can still throw the original error for diagnosis.
+function sanitizeJsonResponse(raw) {
+  if (typeof raw !== 'string' || !raw) return raw;
+  let s = raw.trim();
+  // Strip ```json fences (any language tag)
+  s = s.replace(/^```(?:json|JSON)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  // Find the first { or [ and the last matching } or ]
+  const firstObj = s.indexOf('{');
+  const firstArr = s.indexOf('[');
+  let start = -1;
+  if (firstObj >= 0 && (firstArr < 0 || firstObj < firstArr)) start = firstObj;
+  else if (firstArr >= 0) start = firstArr;
+  if (start < 0) return s.trim();
+  const opener = s[start];
+  const closer = opener === '{' ? '}' : ']';
+  const end = s.lastIndexOf(closer);
+  if (end <= start) return s.slice(start).trim();
+  return s.slice(start, end + 1).trim();
+}
+
 // ─── Gemini rate-limit gate (module-level, shared across concurrent jobs) ────
 // Two safeguards:
 //   1. Minimum spacing between ALL outgoing Gemini calls. Caps peak RPM
@@ -458,7 +481,9 @@ async function generateCategoryTaxonomy(summaries, opts = {}) {
   const targetCount     = Math.max(4, Math.min(30, Number(opts.targetCount) || 12));
   const minSubsPerCat   = Math.max(2, Number(opts.minSubsPerCat) || 4);
   const maxSubsPerCat   = Math.max(minSubsPerCat, Number(opts.maxSubsPerCat) || 10);
-  const maxOutputTokens = Math.max(1024, Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 8192);
+  // Same decoupling as generaliseCategoryTaxonomy — taxonomy output never hits
+  // Excel, so the cap can be much higher than GEMINI_MAX_OUTPUT_TOKENS.
+  const maxOutputTokens = Math.max(8192, Number(process.env.GEMINI_TAXONOMY_MAX_TOKENS) || 32768);
 
   // Number the summaries so model errors / debugging can refer back to them.
   const numbered = cleanSummaries.map((s, i) => `${i + 1}. ${s}`).join('\n');
@@ -540,10 +565,25 @@ ${numbered}
     }
 
     const data = await resp.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const finishReason = data?.candidates?.[0]?.finishReason;
+    const cleaned = sanitizeJsonResponse(rawText);
     let parsed;
-    try { parsed = JSON.parse(text); }
-    catch { return { success: false, error: 'Invalid JSON returned from Gemini taxonomy gen' }; }
+    try { parsed = JSON.parse(cleaned); }
+    catch (e) {
+      const truncated = finishReason === 'MAX_TOKENS';
+      logger.error('Taxonomy gen JSON parse failed', {
+        error: e.message, finishReason, truncated, raw: rawText.slice(0, 1500),
+      });
+      return {
+        success: false,
+        error: truncated
+          ? 'Gemini taxonomy response exceeded GEMINI_TAXONOMY_MAX_TOKENS — raise the cap or run on a smaller subset'
+          : 'Invalid JSON returned from Gemini taxonomy gen',
+        finishReason,
+        raw: rawText.slice(0, 1500),
+      };
+    }
 
     const cats = Array.isArray(parsed?.categories) ? parsed.categories : [];
     // Normalize + validate. Drop empty/duplicate names; trim everything.
@@ -610,7 +650,11 @@ async function generaliseCategoryTaxonomy(existingCategories, opts = {}) {
     .filter(c => c.name);
   if (cats.length === 0) return { success: false, error: 'No existing categories to generalise' };
 
-  const maxOutputTokens = Math.max(2048, Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 8192);
+  // Decoupled from GEMINI_MAX_OUTPUT_TOKENS (which is tuned for Excel-cell
+  // safety on transcription output). Taxonomy responses go straight to
+  // JSON.parse and can include 100+ merged_from entries with pretty-printing
+  // overhead, so we need a much higher cap. Override via GEMINI_TAXONOMY_MAX_TOKENS.
+  const maxOutputTokens = Math.max(8192, Number(process.env.GEMINI_TAXONOMY_MAX_TOKENS) || 32768);
 
   const numbered = cats.map((c, i) =>
     `${i + 1}. ${c.name}${c.sub_categories.length ? '  [subs: ' + c.sub_categories.join(', ') + ']' : ''}`
@@ -703,12 +747,24 @@ ${numbered}
     }
 
     const data = await resp.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const finishReason = data?.candidates?.[0]?.finishReason;
+    const cleaned = sanitizeJsonResponse(rawText);
     let parsed;
-    try { parsed = JSON.parse(text); }
+    try { parsed = JSON.parse(cleaned); }
     catch (e) {
-      logger.error('Generalise JSON parse failed', { error: e.message, raw: text.slice(0, 1500) });
-      return { success: false, error: 'Invalid JSON returned from Gemini generalise', raw: text.slice(0, 1500) };
+      const truncated = finishReason === 'MAX_TOKENS';
+      logger.error('Generalise JSON parse failed', {
+        error: e.message, finishReason, truncated, raw: rawText.slice(0, 1500),
+      });
+      return {
+        success: false,
+        error: truncated
+          ? 'Gemini taxonomy response exceeded GEMINI_TAXONOMY_MAX_TOKENS — raise the cap or run on a smaller subset'
+          : 'Invalid JSON returned from Gemini generalise',
+        finishReason,
+        raw: rawText.slice(0, 1500),
+      };
     }
 
     // Normalise the response and build the per-old-category mapping.
