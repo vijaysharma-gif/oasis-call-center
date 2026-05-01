@@ -334,7 +334,7 @@ export default function AIAnalysis() {
                   {isAdmin && visibleCols.agent && <th className="px-4 py-3 font-semibold">Agent</th>}
                   {visibleCols.duration && <th className="px-4 py-3 font-semibold">Duration</th>}
                   {visibleCols.date && <SortTh col="created_at" label="Date" sortBy={sortBy} sortDir={sortDir} onSort={toggleSort} />}
-                  {visibleCols.recording && <th className="px-4 py-3 font-semibold">Recording</th>}
+                  {visibleCols.recording && <SortTh col="recording" label="Recording" sortBy={sortBy} sortDir={sortDir} onSort={toggleSort} />}
                   <th className="px-4 py-3 font-semibold w-10">
                     <div className="relative" ref={colMenuRef}>
                       <button

@@ -354,13 +354,13 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Called</th>
               {!isAgent && <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Agent Name</th>}
               {!isAgent && <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Agent No.</th>}
+              <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Keypress</th>
               <SortTh col="call_start_time" label="Start Time" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
               <SortTh col="agent_answer_time" label="Answer Time" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">End Time</th>
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Duration</th>
               <SortTh col="agent_duration" label="Agent Duration" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Status</th>
-              <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Keypress</th>
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Category</th>
               <th className="px-3 py-2.5 font-semibold whitespace-nowrap">Sub-Category</th>
               <SortTh col="recording" label="Recording" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
@@ -432,6 +432,7 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                       </>
                     );
                   })()}
+                  <td className="px-3 py-2 text-slate-700 dark:text-zinc-300 tabular-nums text-center">{call.keypress || '—'}</td>
                   <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 whitespace-nowrap text-xs">{formatDate(call.call_start_time || call.created_at)}</td>
                   <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 whitespace-nowrap text-xs">{formatDate(call.agent_answer_time)}</td>
                   <td className="px-3 py-2 text-slate-500 dark:text-zinc-400 whitespace-nowrap text-xs">{formatDate(call.call_end_time)}</td>
@@ -443,7 +444,6 @@ export default function CallsTable({ calls, hasFilters = false, isAgent = false,
                       <DialBtn call={call} />
                     </div>
                   </td>
-                  <td className="px-3 py-2 text-slate-700 dark:text-zinc-300 tabular-nums text-center">{call.keypress || '—'}</td>
                   <td className="px-3 py-2 text-slate-600 dark:text-zinc-300 text-xs whitespace-nowrap">{call.category || '—'}</td>
                   <td className="px-3 py-2 text-slate-600 dark:text-zinc-300 text-xs whitespace-nowrap">{call.sub_category || '—'}</td>
                   <td className="px-3 py-2 min-w-[200px]">

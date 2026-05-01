@@ -825,14 +825,59 @@ router.get('/', async (req, res) => {
   const filter = { $and: conditions };
 
   const SORT_FIELDS = { bugs: 'bugs', bug_category: 'bug_category', call_category: 'call_category', call_resolved: 'call_resolved', agent_score: 'agent_score', audio_quality: 'audio_quality.rating', created_at: 'created_at' };
-  const sortField = SORT_FIELDS[sortBy] ?? 'created_at';
   const sortOrder = sortDir === 'asc' ? 1 : -1;
 
-  const [docs, total] = await Promise.all([
-    db.collection('call_analysis').find(filter, { projection: { _id: 0 } })
-      .sort({ [sortField]: sortOrder }).skip(Number(offset)).limit(Number(limit)).toArray(),
-    db.collection('call_analysis').countDocuments(filter),
-  ]);
+  // Sort by recording length lives on the joined `calls` collection (duration
+  // field), so we need an aggregation path. Other sorts stay on the simpler
+  // find().sort() to avoid the lookup overhead. Both paths produce the same
+  // shape: an array of call_analysis docs (sans _id).
+  let docs, total;
+  if (sortBy === 'recording') {
+    const pipeline = [
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'calls',
+          localField: 'call_id',
+          foreignField: 'call_id',
+          as: '_call',
+        },
+      },
+      { $unwind: { path: '$_call', preserveNullAndEmptyArrays: true } },
+      {
+        $addFields: {
+          // "Has recording" pins to the bottom regardless of asc/desc.
+          _hasVal: {
+            $cond: [
+              {
+                $and: [
+                  { $ne: ['$_call.call_recording', null] },
+                  { $ne: ['$_call.call_recording', ''] },
+                ],
+              },
+              1, 0,
+            ],
+          },
+          _dur: { $ifNull: ['$_call.duration', 0] },
+        },
+      },
+      { $sort: { _hasVal: -1, _dur: sortOrder, _id: -1 } },
+      { $skip: Number(offset) },
+      { $limit: Number(limit) },
+      { $project: { _id: 0, _hasVal: 0, _dur: 0, _call: 0 } },
+    ];
+    [docs, total] = await Promise.all([
+      db.collection('call_analysis').aggregate(pipeline).toArray(),
+      db.collection('call_analysis').countDocuments(filter),
+    ]);
+  } else {
+    const sortField = SORT_FIELDS[sortBy] ?? 'created_at';
+    [docs, total] = await Promise.all([
+      db.collection('call_analysis').find(filter, { projection: { _id: 0 } })
+        .sort({ [sortField]: sortOrder }).skip(Number(offset)).limit(Number(limit)).toArray(),
+      db.collection('call_analysis').countDocuments(filter),
+    ]);
+  }
 
   // Join call data (caller, called, agent, duration, start time)
   const callIds  = docs.map(d => d.call_id);
