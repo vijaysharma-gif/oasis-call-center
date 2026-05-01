@@ -581,6 +581,208 @@ ${numbered}
   }
 }
 
+// ─── Taxonomy generalisation (meta-prompt) ──────────────────────────────────
+// Input: the CURRENT call_categories — an array of { name, sub_categories[] }
+// objects (legacy flat docs with no sub_categories pass through with []).
+// Output: a SMALLER, BROADER hierarchical taxonomy + a per-old-category
+// mapping that says which (new parent, new sub_category) each old category
+// becomes. The mapping powers the retro-remap that rewrites every existing
+// call_analysis / calls record so historical data uses the new vocabulary.
+//
+// Hard rules enforced in the prompt:
+//   - Cover EVERY old category (no orphans). If a category truly doesn't
+//     fit anywhere, it gets mapped to its own ("Other", "<old_name>") pair
+//     so we still have a deterministic destination.
+//   - New top-level categories are mutually exclusive (no overlap).
+//   - Sub-categories are short, concrete, and belong to exactly one parent.
+async function generaliseCategoryTaxonomy(existingCategories, opts = {}) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model  = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  if (!apiKey) return { success: false, error: 'GEMINI_API_KEY not set' };
+
+  const cats = (Array.isArray(existingCategories) ? existingCategories : [])
+    .map(c => ({
+      name: typeof c?.name === 'string' ? c.name.trim() : '',
+      sub_categories: Array.isArray(c?.sub_categories)
+        ? c.sub_categories.map(s => typeof s === 'string' ? s.trim() : '').filter(Boolean)
+        : [],
+    }))
+    .filter(c => c.name);
+  if (cats.length === 0) return { success: false, error: 'No existing categories to generalise' };
+
+  const maxOutputTokens = Math.max(2048, Number(process.env.GEMINI_MAX_OUTPUT_TOKENS) || 8192);
+
+  const numbered = cats.map((c, i) =>
+    `${i + 1}. ${c.name}${c.sub_categories.length ? '  [subs: ' + c.sub_categories.join(', ') + ']' : ''}`
+  ).join('\n');
+
+  const prompt = `
+You are reorganising a customer-support call taxonomy. You will receive
+${cats.length} existing categories (some with their own sub-categories) and
+must consolidate them into a smaller, well-defined hierarchy. The output
+becomes the canonical taxonomy used to classify EVERY future call AND will
+be applied retroactively to every existing record — so the merge mapping
+must be exhaustive and deterministic.
+
+Hard requirements:
+
+1) MUTUALLY EXCLUSIVE
+   - No two new top-level categories overlap in meaning.
+   - Within each category, no two sub-categories overlap.
+
+2) EVERY OLD CATEGORY MAPS SOMEWHERE
+   - Each input category MUST appear exactly once in some category's
+     "merged_from" list. No orphans, no duplicates across categories.
+   - If a single input category would split across multiple new buckets,
+     pick the dominant fit and assign it once — never duplicate.
+
+3) RIGHT GRANULARITY
+   - Choose the number of top-level categories yourself based on the
+     natural cluster boundaries in the input. A small, sharply-themed
+     corpus might collapse to 5; a broad one might need 15. Don't pad
+     to hit any count, don't merge unrelated themes just to keep totals
+     low.
+   - Same for sub-categories per parent — use as many as the data
+     needs and no more. A parent covering two sharp issues should have
+     two subs; one covering ten distinct issues should have ten.
+   - Every category and every sub-category must be concrete enough
+     that the next call clearly belongs to exactly one. No
+     "Misc"/"General"/"Other" except as the residual sub when an
+     input doesn't fit cleanly elsewhere.
+
+4) NAMING
+   - Title Case. No emoji. No abbreviations a new agent wouldn't recognise.
+   - Same grammatical pattern across siblings.
+   - Under 60 chars per name.
+
+5) MERGE MAPPING
+   - For each new category, list "merged_from" with one entry per old input
+     it absorbs. Each entry is { "old_category": "<exact old name>",
+     "new_sub_category": "<one of this category's sub_categories>" }.
+   - The new_sub_category MUST come from the same category's
+     sub_categories list — it cannot reference another category's subs.
+
+Return JSON ONLY, no markdown fence, no commentary:
+{
+  "categories": [
+    {
+      "name": "<New Top-level>",
+      "sub_categories": ["<sub 1>", "<sub 2>"],
+      "merged_from": [
+        { "old_category": "<old name>", "new_sub_category": "<sub 1>" }
+      ]
+    }
+  ]
+}
+
+EXISTING CATEGORIES (n=${cats.length}):
+${numbered}
+`;
+
+  try {
+    await awaitGeminiSlot(model);
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const resp = await fetchWithTimeout(
+      url,
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { response_mime_type: 'application/json', maxOutputTokens },
+        }),
+      },
+      300_000
+    );
+
+    if (!resp.ok) {
+      if (resp.status === 429) {
+        markGeminiRateLimited(parseRetryAfter(resp.headers.get('retry-after')), 'generalise', model);
+      }
+      return { success: false, error: `Gemini generalise failed: HTTP ${resp.status} ${await resp.text()}` };
+    }
+
+    const data = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      logger.error('Generalise JSON parse failed', { error: e.message, raw: text.slice(0, 1500) });
+      return { success: false, error: 'Invalid JSON returned from Gemini generalise', raw: text.slice(0, 1500) };
+    }
+
+    // Normalise the response and build the per-old-category mapping.
+    const oldNamesLower = new Set(cats.map(c => c.name.toLowerCase()));
+    const seenOld       = new Set();   // old category names already mapped (case-insensitive)
+    const seenNewName   = new Set();   // new top-level names (case-insensitive, dedupe)
+    const normalized    = [];
+    const mapping       = {};          // old_category_name → { new_category, new_sub_category }
+
+    for (const c of (Array.isArray(parsed?.categories) ? parsed.categories : [])) {
+      const newName = (typeof c?.name === 'string' ? c.name : '').trim();
+      if (!newName || seenNewName.has(newName.toLowerCase())) continue;
+      const subsRaw = Array.isArray(c?.sub_categories) ? c.sub_categories : [];
+      const validSubs = [];
+      const subsSeen = new Set();
+      for (const s of subsRaw) {
+        const sn = (typeof s === 'string' ? s : '').trim();
+        if (!sn || subsSeen.has(sn.toLowerCase())) continue;
+        subsSeen.add(sn.toLowerCase());
+        validSubs.push(sn);
+      }
+      if (validSubs.length === 0) continue;
+
+      const subSetLower = new Set(validSubs.map(s => s.toLowerCase()));
+      const mergedRaw = Array.isArray(c?.merged_from) ? c.merged_from : [];
+      const accepted  = [];
+      for (const m of mergedRaw) {
+        const oldName = (typeof m?.old_category === 'string' ? m.old_category : '').trim();
+        const newSub  = (typeof m?.new_sub_category === 'string' ? m.new_sub_category : '').trim();
+        if (!oldName) continue;
+        const oldLower = oldName.toLowerCase();
+        if (!oldNamesLower.has(oldLower) || seenOld.has(oldLower)) continue;       // unknown or already mapped
+        const subToUse = subSetLower.has(newSub.toLowerCase()) ? newSub : validSubs[0];
+        seenOld.add(oldLower);
+        accepted.push({ old_category: oldName, new_sub_category: subToUse });
+        mapping[oldName] = { new_category: newName, new_sub_category: subToUse };
+      }
+
+      seenNewName.add(newName.toLowerCase());
+      normalized.push({ name: newName, sub_categories: validSubs, merged_from: accepted });
+    }
+
+    // Catch-all for any old category Gemini didn't map: send them to the
+    // "Uncategorised" sentinel rather than synthesising a real parent in the
+    // call_categories collection. Records that retro-remap into Uncategorised
+    // get picked up by the hourly auto-worker, which tries to fit them into
+    // the live generalised taxonomy on a recurring tick. The sentinel
+    // (Uncategorised, -) is NOT a real category — it lives only on records,
+    // never in the call_categories collection.
+    const unmapped = cats.filter(c => !seenOld.has(c.name.toLowerCase()));
+    if (unmapped.length > 0) {
+      for (const u of unmapped) {
+        mapping[u.name] = { new_category: 'Uncategorised', new_sub_category: '-' };
+      }
+      logger.warn('Generalise: unmapped categories sent to Uncategorised sentinel', { count: unmapped.length });
+    }
+
+    if (normalized.length === 0) {
+      return { success: false, error: 'Gemini returned no usable categories', raw: text.slice(0, 1000) };
+    }
+
+    return {
+      success:        true,
+      categories:     normalized,
+      mapping,                                 // old_name → { new_category, new_sub_category }
+      input_count:    cats.length,
+      output_count:   normalized.length,
+      gemini_model:   model,
+    };
+  } catch (err) {
+    return { success: false, error: err.message || 'Unexpected generalise error' };
+  }
+}
+
 async function categorizeRecording(audioUrl, { callCategories = [], bugCategories = [] } = {}, maxRetries = 3) {
   const apiKey = process.env.GEMINI_API_KEY;
   const model  = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
@@ -934,4 +1136,4 @@ OUTPUT FORMAT (must match exactly):
   return { success: false, error: 'Max retries exceeded' };
 }
 
-module.exports = { categorizeRecording, CATEGORIZATION_SCHEMA, detectTranscriptionLoop, generateCategoryTaxonomy };
+module.exports = { categorizeRecording, CATEGORIZATION_SCHEMA, detectTranscriptionLoop, generateCategoryTaxonomy, generaliseCategoryTaxonomy };

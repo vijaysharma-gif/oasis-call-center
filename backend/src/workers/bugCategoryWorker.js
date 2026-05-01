@@ -44,9 +44,24 @@ async function resolveUncategorised({ label, sourceField, targetField, categoryC
   for (let i = 0; i < uncategorised.length; i += BATCH) {
     const batch = uncategorised.slice(i, i + BATCH);
     try {
-      const prompt = `These items did not fit into any existing category: ${JSON.stringify(categories)}
+      const prompt = `These items did not fit into any existing category. The existing categories are: ${JSON.stringify(categories)}
 
-Create new short category names (2-5 words) for each item. Group similar items under the same new category.
+Your job: assign each item to a category.
+
+PRIORITY ORDER:
+1. RECONSIDER FIRST. For each item, look again at the existing list above.
+   If the item plausibly belongs to one of those categories — even loosely —
+   USE THE EXISTING CATEGORY NAME EXACTLY. Don't create something new.
+
+2. ONLY IF an item genuinely doesn't fit any existing category, create a new
+   short name (2-5 words). The new name MUST be semantically distinct from
+   every entry in the existing list — no near-duplicates, no synonyms, no
+   re-phrasings ("OTP Issues" vs "OTP Problems" → same thing, don't do
+   this). If two items would each create near-duplicate new names, group
+   them under one new name instead.
+
+3. Group similar items under the same category (whether existing or new) so
+   we don't fragment the taxonomy.
 
 Items:
 ${batch.map(b => b.call_id + ': ' + b[sourceField]).join('\n')}

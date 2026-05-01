@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const { getDb } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { createExportJob, getExportJob } = require('../workers/exportWorker');
-const { detectTranscriptionLoop, generateCategoryTaxonomy } = require('../services/geminiService');
+const { detectTranscriptionLoop, generateCategoryTaxonomy, generaliseCategoryTaxonomy } = require('../services/geminiService');
 
 const router = express.Router();
 
@@ -646,6 +646,144 @@ router.post('/generate-categories', requireAdmin, async (req, res) => {
     written: { call_categories: newDocs.length, replaced: existing.length },
     audit,
     message: `Replaced call_categories: ${existing.length} → ${newDocs.length}. The next analysis tick uses the new taxonomy.`,
+  });
+});
+
+// POST /api/analysis/generalise-categories — admin-only: take the CURRENT
+// call_categories collection (granular, possibly many entries from the v3.4.0
+// generator + the hourly auto-worker) and consolidate it into a smaller,
+// well-defined hierarchy via Gemini. Then RETRO-REMAP every existing record
+// — both call_analysis and calls — so historical data uses the new vocabulary
+// without re-running Gemini per record.
+//
+// Body (all optional):
+//   dry_run: boolean   if true, return proposal only (default true)
+//   commit:  boolean   alias for dry_run=false
+//   reason:  string    audit note for the history record
+//
+// Top-level count and sub-category counts per parent are intentionally NOT
+// knobs — Gemini decides both based on the natural cluster boundaries in
+// the input. No padding to hit a target, no forced merging.
+router.post('/generalise-categories', requireAdmin, async (req, res) => {
+  const db = await getDb();
+  const body = req.body || {};
+  const dryRun = body.commit === true ? false : (body.dry_run !== false);
+
+  const existing = await db.collection('call_categories')
+    .find({}, { projection: { _id: 0 } })
+    .toArray();
+
+  if (existing.length < 4) {
+    return res.status(400).json({
+      ok: false,
+      error: `Not enough categories to generalise (found ${existing.length}, need >= 4). Run /generate-categories first or wait for the auto-worker to populate.`,
+    });
+  }
+
+  // Hand them to Gemini in the shape the helper expects (always include
+  // sub_categories, falling back to []).
+  const input = existing.map(c => ({
+    name: c.name,
+    sub_categories: Array.isArray(c.sub_categories) ? c.sub_categories : [],
+  }));
+  const result = await generaliseCategoryTaxonomy(input, {});
+  if (!result.success) {
+    return res.status(502).json({ ok: false, error: result.error || 'Gemini generalisation failed', raw: result.raw });
+  }
+
+  const audit = {
+    generalised_at: new Date(),
+    generalised_by: req.user?.name || req.user?.role || 'admin',
+    reason:         typeof body.reason === 'string' ? body.reason.trim().slice(0, 200) : null,
+    gemini_model:   result.gemini_model,
+    input_count:    result.input_count,
+    output_count:   result.output_count,
+  };
+
+  if (dryRun) {
+    return res.json({
+      ok: true,
+      dry_run: true,
+      categories: result.categories,
+      mapping: result.mapping,
+      input_count: result.input_count,
+      output_count: result.output_count,
+      audit,
+      message: `Dry run: would consolidate ${result.input_count} → ${result.output_count} categories and remap every call_analysis + calls record. Re-send with commit=true to apply.`,
+    });
+  }
+
+  // ── Commit path ────────────────────────────────────────────────────────
+  // 1. Snapshot the old + new + mapping into history (audit, rollback)
+  // 2. Replace call_categories with the new generalised list
+  // 3. Bulk remap call_analysis (call_category, call_sub_category)
+  // 4. Bulk remap calls (category, sub_category — used by the calls table)
+  //
+  // Steps 3 and 4 use one updateMany per old category (typically 20-100 calls
+  // per old category in production, so this is a small number of round trips
+  // even for huge corpora). Each updateMany is idempotent.
+
+  await db.collection('call_categories_history').insertOne({
+    ...audit,
+    kind:                'generalise',
+    previous_categories: existing,
+    new_categories:      result.categories,
+    mapping:             result.mapping,
+  });
+
+  const now = new Date();
+  await db.collection('call_categories').deleteMany({});
+  const newDocs = result.categories.map(c => ({
+    name:           c.name,
+    sub_categories: c.sub_categories,
+    merged_from:    c.merged_from || [],
+    source:         'gemini-generalised',
+    generalised_at: now,
+    generalised_by: audit.generalised_by,
+    gemini_model:   audit.gemini_model,
+  }));
+  if (newDocs.length > 0) await db.collection('call_categories').insertMany(newDocs);
+
+  // Retro-remap. Each entry in mapping says: where old_category appears,
+  // rewrite call_category -> new_category and call_sub_category ->
+  // new_sub_category. We do call_analysis AND calls — the calls collection
+  // also stores category/sub_category for the table view.
+  let analysisRemapped = 0, callsRemapped = 0;
+  for (const [oldCat, target] of Object.entries(result.mapping)) {
+    const a = await db.collection('call_analysis').updateMany(
+      { call_category: oldCat },
+      { $set: {
+          call_category:     target.new_category,
+          call_sub_category: target.new_sub_category,
+          remapped_at:       now,
+          remapped_from_category: oldCat,
+        }
+      }
+    );
+    analysisRemapped += a.modifiedCount || 0;
+
+    const c = await db.collection('calls').updateMany(
+      { category: oldCat },
+      { $set: { category: target.new_category, sub_category: target.new_sub_category } }
+    );
+    callsRemapped += c.modifiedCount || 0;
+  }
+
+  res.json({
+    ok: true,
+    dry_run: false,
+    categories: result.categories,
+    mapping: result.mapping,
+    input_count: result.input_count,
+    output_count: result.output_count,
+    written: {
+      call_categories: newDocs.length,
+      replaced:        existing.length,
+      call_analysis_remapped: analysisRemapped,
+      calls_remapped:         callsRemapped,
+    },
+    audit,
+    message: `Consolidated ${result.input_count} → ${result.output_count} categories. Remapped ${analysisRemapped} call_analysis records and ${callsRemapped} calls. The next analysis tick uses the new taxonomy.`,
   });
 });
 
