@@ -898,7 +898,27 @@ router.get('/', async (req, res) => {
     db.collection('call_categories').find({}).sort({ name: 1 }).toArray(),
   ]);
 
-  res.json({ analyses, total, categories: categories.sort(), bugCategories: bugCategories.map(c => c.name), callCategories: callCategories.map(c => c.name) });
+  // "Uncategorised" is a sentinel — records can hold it via the v3.5.0
+  // retro-remap or when categorize returns it as the no-fit fallback — but
+  // it never appears as a document in call_categories, so we append it to
+  // the dropdown explicitly. Same idea for bug_categories, where the auto-
+  // worker's no-fit case writes "-" but operators occasionally need to
+  // filter on truly Uncategorised bugs too.
+  const callCategoryNames = callCategories.map(c => c.name);
+  if (!callCategoryNames.some(n => n.toLowerCase() === 'uncategorised')) {
+    callCategoryNames.push('Uncategorised');
+  }
+  const bugCategoryNames = bugCategories.map(c => c.name);
+  if (!bugCategoryNames.some(n => n.toLowerCase() === 'uncategorised')) {
+    bugCategoryNames.push('Uncategorised');
+  }
+
+  res.json({
+    analyses, total,
+    categories: categories.sort(),
+    bugCategories: bugCategoryNames,
+    callCategories: callCategoryNames,
+  });
 });
 
 module.exports = router;
